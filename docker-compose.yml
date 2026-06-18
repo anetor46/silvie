@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     # Bind to loopback only — same security model as `cargo run` locally.
     ports:
-      - "127.0.0.1:8080:8080"
+      - "8080:8080"
     environment:
       PORT: "8080"
       RUST_LOG: "info,silvie_server=debug"

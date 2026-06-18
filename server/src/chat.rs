@@ -1,6 +1,3 @@
-//! POST /chat — accepts a list of chat messages, returns an SSE stream of token
-//! events ending in `done` (or `error` if something goes wrong).
-
 use std::sync::Arc;
 
 use futures::StreamExt;

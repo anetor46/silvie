@@ -1,5 +1,3 @@
-//! Wires up the HTTP server: routes, CORS, shared state, graceful shutdown.
-
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -19,9 +17,8 @@ fn health() -> &'static str {
     "OK"
 }
 
-pub async fn run(api_key: String, port: u16) -> Result<()> {
+pub async fn run(api_key: &str, host: &str, port: u16) -> Result<()> {
     let llm = Arc::new(LlmClient::new(&api_key));
-
     let cors = Cors::new()
         .allow_origin("http://localhost:1420") // Tauri dev URL
         .allow_origin("tauri://localhost")     // macOS / Linux prod webview
@@ -35,7 +32,7 @@ pub async fn run(api_key: String, port: u16) -> Result<()> {
         .with(AddData::new(llm))
         .with(cors);
 
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{host}:{port}");
     info!("silvie-server listening on http://{addr}");
 
     // TODO(deploy): the server is currently loopback-only and unauthenticated.

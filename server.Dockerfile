@@ -27,7 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /silvie-server /usr/local/bin/silvie-server
 
 USER silvie
+
 WORKDIR /home/silvie
+COPY /server/config ./
+
 
 EXPOSE 8080
 
