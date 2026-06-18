@@ -29,7 +29,7 @@ COPY --from=builder /silvie-server /usr/local/bin/silvie-server
 USER silvie
 
 WORKDIR /home/silvie
-COPY /server/config ./
+COPY /server/config ./config
 
 
 EXPOSE 8080

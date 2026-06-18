@@ -20,6 +20,7 @@ fn health() -> &'static str {
 pub async fn run(api_key: &str, host: &str, port: u16) -> Result<()> {
     let llm = Arc::new(LlmClient::new(&api_key));
     let cors = Cors::new()
+        .allow_origin("http://127.0.0.1:1420") // Tauri dev URL
         .allow_origin("http://localhost:1420") // Tauri dev URL
         .allow_origin("tauri://localhost")     // macOS / Linux prod webview
         .allow_origin("https://tauri.localhost") // Windows prod webview

@@ -11,7 +11,7 @@ use std::pin::Pin;
 
 use crate::types::{ChatMessage, Role};
 
-const MODEL: &str = "gemini-2.0-flash";
+const MODEL: &str = "gemini-3.1-flash-lite";
 
 pub struct LlmClient {
     client: gemini::Client,
