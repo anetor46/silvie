@@ -1,7 +1,0 @@
-target/
-.env
-.env.*
-!.env.example
-*.md
-Dockerfile
-.dockerignore

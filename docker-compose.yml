@@ -1,8 +1,7 @@
 services:
   silvie-server:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      dockerfile: server.Dockerfile
     container_name: silvie-server
     restart: unless-stopped
     # Bind to loopback only — same security model as `cargo run` locally.
