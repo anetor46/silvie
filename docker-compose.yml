@@ -1,0 +1,20 @@
+services:
+  silvie-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: silvie-server
+    restart: unless-stopped
+    # Bind to loopback only — same security model as `cargo run` locally.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      PORT: "8080"
+      RUST_LOG: "info,silvie_server=debug"
+      GEMINY_API_KEY: ${GEMINY_API_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

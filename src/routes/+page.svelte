@@ -1,11 +1,13 @@
 <script lang="ts">
   import { conversations } from '$lib/stores/conversations.svelte';
+  import { streamChat, type ChatMessage } from '$lib/services/chat';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import MessageList from '$lib/components/MessageList.svelte';
   import InputBar from '$lib/components/InputBar.svelte';
 
   let inputValue = $state('');
   let messagesEl = $state<HTMLElement | undefined>(undefined);
+  let currentStream: { cancel: () => void } | null = null;
 
   const suggestions = [
     "What's on my schedule today?",
@@ -22,16 +24,37 @@
     const text = inputValue.trim();
     if (!text) return;
 
+    // If a previous generation is still running, abort it.
+    currentStream?.cancel();
+
     conversations.sendUserMessage(text);
     inputValue = '';
     scrollToBottom();
 
-    setTimeout(() => {
-      conversations.addAssistantMessage(
-        "I'm Silvie, your AI Chief of Staff. Full intelligence is coming soon — for now I'm just getting started.",
-      );
+    const history: ChatMessage[] =
+      conversations.active?.messages.map((m) => ({ role: m.role, content: m.content })) ?? [];
+
+    const assistantId = conversations.startAssistantMessage();
+    scrollToBottom();
+
+    const handle = streamChat(history, (chunk) => {
+      conversations.appendToAssistantMessage(assistantId, chunk);
       scrollToBottom();
-    }, 700);
+    });
+    currentStream = handle;
+
+    handle.done
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        const message = err instanceof Error ? err.message : String(err);
+        conversations.appendToAssistantMessage(
+          assistantId,
+          `\n\n_⚠️ ${message}_`,
+        );
+      })
+      .finally(() => {
+        if (currentStream === handle) currentStream = null;
+      });
   }
 
   function handleSuggestion(text: string) {

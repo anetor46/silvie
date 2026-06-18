@@ -5,6 +5,11 @@ node_modules
 /package
 .env
 .env.*
+.claude
+.vscode
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Rust workspace target dir (shared between src-tauri and server)
+/target
