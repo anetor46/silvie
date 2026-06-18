@@ -10,6 +10,8 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+.idea
+.pnpm-store
 
 # Rust workspace target dir (shared between src-tauri and server)
 /target
