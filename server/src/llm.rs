@@ -1,16 +1,13 @@
-//! Thin wrapper over rig's Gemini provider that turns a `Vec<ChatMessage>` into a
-//! token stream of `String` chunks. Isolated here so the rest of the server is
-//! provider-agnostic.
-
 use anyhow::{anyhow, Result};
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use rig::{
-    completion::{Message, Prompt},
+    agent::MultiTurnStreamItem,
+    client::CompletionClient,
+    completion::Message,
     providers::gemini,
-    streaming::{StreamingChat, StreamingChoice},
+    streaming::{StreamedAssistantContent, StreamingChat},
 };
 use std::pin::Pin;
-use tokio_stream::StreamExt;
 
 use crate::types::{ChatMessage, Role};
 
@@ -23,7 +20,7 @@ pub struct LlmClient {
 impl LlmClient {
     pub fn new(api_key: &str) -> Self {
         Self {
-            client: gemini::Client::new(api_key),
+            client: gemini::Client::new(api_key).expect("failed to build Gemini client"),
         }
     }
 
@@ -34,9 +31,7 @@ impl LlmClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let (system_prompt, history, prompt) = split_history(&messages)?;
 
-        let mut builder = self
-            .client
-            .agent(MODEL);
+        let mut builder = self.client.agent(MODEL);
 
         if let Some(sys) = system_prompt {
             builder = builder.preamble(&sys);
@@ -44,15 +39,16 @@ impl LlmClient {
 
         let agent = builder.build();
 
-        let stream = agent
-            .stream_chat(&prompt, history)
-            .await
-            .map_err(|e| anyhow!("rig stream_chat failed: {e}"))?;
+        let stream = agent.stream_chat(prompt, history).await;
 
-        let mapped = stream.map(|item| match item {
-            Ok(StreamingChoice::Message(t)) => Ok(t),
-            Ok(StreamingChoice::ToolCall(_, _, _)) => Ok(String::new()), // ignore tool calls for v1
-            Err(e) => Err(anyhow!("rig stream error: {e}")),
+        let mapped = stream.filter_map(|item| async move {
+            match item {
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::Text(text),
+                )) => Some(Ok(text.text)),
+                Ok(_) => None,
+                Err(e) => Some(Err(anyhow!("rig stream error: {e}"))),
+            }
         });
 
         Ok(Box::pin(mapped))
@@ -63,8 +59,6 @@ impl LlmClient {
 /// - the system prompt (optional)
 /// - the chat history (everything except the last message), as rig `Message`s
 /// - the final user prompt
-///
-/// Errors if the final message isn't from the user, or if there are no user messages.
 fn split_history(messages: &[ChatMessage]) -> Result<(Option<String>, Vec<Message>, String)> {
     if messages.is_empty() {
         return Err(anyhow!("messages array is empty"));
@@ -76,7 +70,6 @@ fn split_history(messages: &[ChatMessage]) -> Result<(Option<String>, Vec<Messag
     for m in messages {
         match m.role {
             Role::System => {
-                // Concatenate multiple system messages if present.
                 system_prompt = Some(match system_prompt {
                     Some(s) => format!("{s}\n\n{}", m.content),
                     None => m.content.clone(),
@@ -99,15 +92,9 @@ fn split_history(messages: &[ChatMessage]) -> Result<(Option<String>, Vec<Messag
     let history: Vec<Message> = rest[..rest.len() - 1]
         .iter()
         .map(|m| match m.role {
-            Role::User => Message {
-                role: "user".into(),
-                content: m.content.clone(),
-            },
-            Role::Assistant => Message {
-                role: "assistant".into(),
-                content: m.content.clone(),
-            },
-            Role::System => unreachable!("system messages have been filtered above"),
+            Role::User => Message::user(m.content.clone()),
+            Role::Assistant => Message::assistant(m.content.clone()),
+            Role::System => unreachable!("system messages filtered above"),
         })
         .collect();
 

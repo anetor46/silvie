@@ -16,7 +16,7 @@ use crate::{chat::chat_handler, llm::LlmClient};
 
 #[handler]
 fn health() -> &'static str {
-    "ok"
+    "OK"
 }
 
 pub async fn run(api_key: String, port: u16) -> Result<()> {

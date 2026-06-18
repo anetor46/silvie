@@ -85,6 +85,10 @@ The chat UI talks to the backend at `http://localhost:8080` by default. Override
 
 The Claude Code built-in preview tool does not work with Tauri — always ask the user to test the app manually with `pnpm tauri dev` (full desktop app) or `pnpm dev` (browser-only frontend at http://localhost:5173). Do not attempt to use the preview tool or take automated screenshots.
 
+## Verifying Rust changes
+
+Before claiming any Rust change is complete, run `cargo check --workspace` (or `cargo check -p <crate>` for a single crate). Type-checking is fast and catches the API-mismatch errors that are easy to introduce when writing against unfamiliar crates. Do not rely solely on inspection — always have the compiler verify.
+
 ## Conventions
 
 - SvelteKit static adapter — no server-side rendering; the build output is a static bundle consumed by Tauri.
