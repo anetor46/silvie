@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Error;
 use futures::StreamExt;
 use poem::{
     handler,
@@ -11,6 +12,22 @@ use poem::{
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error};
+
+fn friendly_error_message(e: &Error) -> String {
+    let msg = format!("{e:#}");
+    if msg.contains("MaxTurnError") || msg.contains("max turn limit") {
+        "I wasn't able to complete your request — it required more back-and-forth \
+         than I'm configured to handle. Please try rephrasing or breaking it into \
+         smaller steps."
+            .to_string()
+    } else if msg.contains("429") || msg.contains("quota") || msg.contains("rate") {
+        "I'm temporarily unable to respond due to usage limits. Please try again in a moment."
+            .to_string()
+    } else {
+        "I encountered an unexpected issue while processing your request. Please try again."
+            .to_string()
+    }
+}
 
 use crate::{
     llm::LlmClient,
@@ -45,9 +62,8 @@ pub async fn chat_handler(
                         }
                         Err(e) => {
                             error!("model stream error: {e:#}");
-                            let _ = tx.send(SseEvent::Error {
-                                message: format!("{e}"),
-                            });
+                            let _ = tx.send(SseEvent::Token { text: friendly_error_message(&e) });
+                            let _ = tx.send(SseEvent::Done);
                             return;
                         }
                     }
@@ -56,9 +72,11 @@ pub async fn chat_handler(
             }
             Err(e) => {
                 error!("failed to start chat stream: {e:#}");
-                let _ = tx.send(SseEvent::Error {
-                    message: format!("{e}"),
+                let _ = tx.send(SseEvent::Token {
+                    text: "I encountered an issue getting ready to respond. Please try again."
+                        .to_string(),
                 });
+                let _ = tx.send(SseEvent::Done);
             }
         }
     });

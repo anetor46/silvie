@@ -77,7 +77,7 @@ impl LlmClient {
             builder = builder.preamble(&preamble);
         }
 
-        let agent = builder.tools(tools).build();
+        let agent = builder.default_max_turns(10).tools(tools).build();
         let stream = agent.stream_chat(prompt, history).await;
 
         let mapped = stream.filter_map(|item| async move {

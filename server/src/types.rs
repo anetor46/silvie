@@ -27,5 +27,6 @@ pub struct ChatRequest {
 pub enum SseEvent {
     Token { text: String },
     Done,
+    #[allow(dead_code)]
     Error { message: String },
 }
