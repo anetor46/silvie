@@ -131,7 +131,13 @@ impl Tool for GoogleCalendarTool {
             .unwrap_or_else(|| (now + Duration::days(7)).to_rfc3339());
         let max_results = args.max_results.unwrap_or(10).min(50);
 
-        debug!("fetching calendar events: time_min={time_min} time_max={time_max} max={max_results}");
+        debug!(
+            access_token_len = self.access_token.len(),
+            time_min,
+            time_max,
+            max_results,
+            "fetching calendar events"
+        );
 
         let response = self
             .http_client

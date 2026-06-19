@@ -188,7 +188,9 @@ pub async fn get_fresh_access_token(client_id: &str, client_secret: &str) -> Res
         .context("Failed to parse stored credentials")?;
 
     let now = chrono::Utc::now().timestamp();
-    let needs_refresh = creds.expires_at.map_or(false, |exp| now + 60 >= exp);
+    // Default to refreshing when expires_at is unknown (credentials stored before
+    // expiry tracking was added) — safer than returning a potentially stale token.
+    let needs_refresh = creds.expires_at.map_or(true, |exp| now + 60 >= exp);
 
     if needs_refresh {
         info!("access token expiring soon, refreshing");
