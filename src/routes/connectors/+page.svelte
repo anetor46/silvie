@@ -1,16 +1,11 @@
 <script lang="ts">
   import { CATEGORIES } from '$lib/data/connectors';
   import ConnectorCard from '$lib/components/ConnectorCard.svelte';
+  import { connectors } from '$lib/stores/connectors.svelte';
 
-  // Track connected state per provider id — initialise every provider to false
-  // so bind:connected never receives undefined (Svelte 5 forbids it).
-  const initialState: Record<string, boolean> = {};
-  for (const category of CATEGORIES) {
-    for (const provider of category.providers) {
-      initialState[provider.id] = false;
-    }
-  }
-  let connected = $state<Record<string, boolean>>(initialState);
+  $effect(() => {
+    connectors.load();
+  });
 </script>
 
 <div class="page">
@@ -25,10 +20,18 @@
         <h2 class="category-label">{category.label}</h2>
         <div class="provider-list">
           {#each category.providers as provider (provider.id)}
-            <ConnectorCard
-              {provider}
-              bind:connected={connected[provider.id]}
-            />
+            {#if provider.id === 'google-calendar'}
+              <ConnectorCard
+                {provider}
+                connectedEmail={connectors.googleCalendar?.email ?? null}
+                loading={connectors.googleCalendarLoading}
+                error={connectors.googleCalendarError}
+                onConnect={() => connectors.connectGoogleCalendar()}
+                onDisconnect={() => connectors.disconnectGoogleCalendar()}
+              />
+            {:else}
+              <ConnectorCard {provider} />
+            {/if}
           {/each}
         </div>
       </section>

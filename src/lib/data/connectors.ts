@@ -3,6 +3,7 @@ export interface Provider {
   name: string;
   color: string;
   textColor?: string;
+  requiresOAuth?: boolean;
 }
 
 export interface ConnectorCategory {
@@ -24,7 +25,7 @@ export const CATEGORIES: ConnectorCategory[] = [
     id: 'calendar',
     label: 'Calendar',
     providers: [
-      { id: 'google-calendar', name: 'Google Calendar', color: '#4285F4', textColor: '#ffffff' },
+      { id: 'google-calendar', name: 'Google Calendar', color: '#4285F4', textColor: '#ffffff', requiresOAuth: true },
       { id: 'outlook-calendar', name: 'Outlook Calendar', color: '#0078D4', textColor: '#ffffff' },
     ],
   },
