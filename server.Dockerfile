@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.lock ./
 COPY server/Cargo.toml ./
 COPY server/src src/
+COPY server/prompts prompts/
 
 RUN cargo build --release \
   && cp /app/target/release/silvie-server /silvie-server
