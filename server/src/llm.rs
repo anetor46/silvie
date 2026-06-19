@@ -14,6 +14,7 @@ use crate::tools::google_calendar::{
     CreateCalendarEventTool, DeleteCalendarEventTool, FindFreeTimeTool, GoogleCalendarTool,
     RespondToEventTool, UpdateCalendarEventTool,
 };
+use crate::tools::travelport::HotelSearchTool;
 use crate::types::{ChatMessage, Role};
 
 const MODEL: &str = "gemini-3.1-flash-lite";
@@ -71,6 +72,20 @@ impl LlmClient {
             tools.push(Box::new(DeleteCalendarEventTool::new(token.clone())));
             tools.push(Box::new(RespondToEventTool::new(token.clone())));
             tools.push(Box::new(FindFreeTimeTool::new(token)));
+        }
+
+        // Conditionally add hotel search tool if Travelport credentials are configured
+        let tp_client_id = std::env::var("TRAVELPORT_CLIENT_ID").ok();
+        let tp_client_secret = std::env::var("TRAVELPORT_CLIENT_SECRET").ok();
+        if let (Some(client_id), Some(client_secret)) = (tp_client_id, tp_client_secret) {
+            let hotel_preamble = include_str!("../prompts/travelport/preamble.md");
+            if preamble.is_empty() {
+                preamble = hotel_preamble.to_string();
+            } else {
+                preamble.push_str("\n\n");
+                preamble.push_str(hotel_preamble);
+            }
+            tools.push(Box::new(HotelSearchTool::new(client_id, client_secret)));
         }
 
         let mut builder = self.client.agent(MODEL);
