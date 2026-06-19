@@ -1,0 +1,367 @@
+use anyhow::{anyhow, Result};
+use poem::{
+    handler,
+    http::StatusCode,
+    web::{Data, Json},
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{debug, error, info, instrument};
+
+const STRIPE_API_BASE: &str = "https://api.stripe.com/v1";
+
+// ── Client ────────────────────────────────────────────────────────────────────
+
+pub struct PaymentClient {
+    pub stripe_key: String,
+    http_client: reqwest::Client,
+}
+
+impl PaymentClient {
+    pub fn new(stripe_key: String) -> Self {
+        Self {
+            stripe_key,
+            http_client: reqwest::Client::new(),
+        }
+    }
+}
+
+// ── Phase 1: SetupIntent (card collection) ────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SetupIntentResponse {
+    pub client_secret: String,
+    pub customer_id: String,
+}
+
+#[derive(Deserialize)]
+struct StripeCustomer {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct StripeSetupIntent {
+    client_secret: String,
+}
+
+impl PaymentClient {
+    /// Creates a Stripe Customer then a SetupIntent so the frontend can
+    /// collect and tokenise a card via Stripe Elements.
+    #[instrument(skip(self), fields(stripe_key_len = self.stripe_key.len()))]
+    pub async fn create_setup_intent(&self) -> Result<SetupIntentResponse> {
+        info!("creating Stripe customer");
+        let cust_resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/customers"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .send()
+            .await?;
+
+        let status = cust_resp.status();
+        let body = cust_resp.text().await?;
+        debug!("Stripe create customer status: {status}");
+        if !status.is_success() {
+            error!("Stripe create customer error ({status}): {body}");
+            return Err(anyhow!("Stripe customer creation failed: HTTP {status}"));
+        }
+        let customer: StripeCustomer = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse Stripe customer: {e}"))?;
+
+        info!("creating Stripe SetupIntent for customer {}", customer.id);
+        let si_resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/setup_intents"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .form(&[("customer", customer.id.as_str()), ("usage", "off_session")])
+            .send()
+            .await?;
+
+        let status = si_resp.status();
+        let body = si_resp.text().await?;
+        debug!("Stripe SetupIntent status: {status}");
+        if !status.is_success() {
+            error!("Stripe SetupIntent error ({status}): {body}");
+            return Err(anyhow!("Stripe SetupIntent creation failed: HTTP {status}"));
+        }
+        let si: StripeSetupIntent = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse Stripe SetupIntent: {e}"))?;
+
+        Ok(SetupIntentResponse {
+            client_secret: si.client_secret,
+            customer_id: customer.id,
+        })
+    }
+}
+
+// ── Phase 1: PaymentMethod details ────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct PaymentMethodDetails {
+    pub last4: String,
+    pub brand: String,
+    pub exp_month: u32,
+    pub exp_year: u32,
+}
+
+#[derive(Deserialize)]
+struct StripePaymentMethod {
+    card: StripeCard,
+}
+
+#[derive(Deserialize)]
+struct StripeCard {
+    last4: String,
+    brand: String,
+    exp_month: u32,
+    exp_year: u32,
+}
+
+impl PaymentClient {
+    /// Retrieves display-safe card metadata (last4, brand, expiry) from Stripe.
+    /// Never returns the full card number.
+    #[instrument(skip(self), fields(stripe_key_len = self.stripe_key.len(), payment_method_id))]
+    pub async fn get_payment_method_details(
+        &self,
+        payment_method_id: &str,
+    ) -> Result<PaymentMethodDetails> {
+        let resp = self
+            .http_client
+            .get(format!("{STRIPE_API_BASE}/payment_methods/{payment_method_id}"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body = resp.text().await?;
+        debug!("Stripe get payment method status: {status}");
+        if !status.is_success() {
+            error!("Stripe get payment method error ({status}): {body}");
+            return Err(anyhow!("Stripe PM retrieval failed: HTTP {status}"));
+        }
+
+        let pm: StripePaymentMethod = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse payment method: {e}"))?;
+
+        Ok(PaymentMethodDetails {
+            last4: pm.card.last4,
+            brand: pm.card.brand,
+            exp_month: pm.card.exp_month,
+            exp_year: pm.card.exp_year,
+        })
+    }
+}
+
+// ── Phase 2: Stripe Issuing (virtual card for GDS booking) ───────────────────
+
+/// Card details returned by Stripe Issuing. Lives in memory only for the
+/// duration of a booking request — never logged or persisted.
+pub struct IssuingCard {
+    pub id: String,
+    pub pan: String,
+    pub exp_month: u32,
+    pub exp_year: u32,
+    pub cvv: String,
+}
+
+#[derive(Deserialize)]
+struct StripeCardholder {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct StripeIssuingCard {
+    id: String,
+    number: Option<String>,
+    exp_month: u32,
+    exp_year: u32,
+    cvc: Option<String>,
+}
+
+impl PaymentClient {
+    /// Creates a single-use Stripe Issuing virtual card capped at `amount_cents`.
+    /// The card's PAN and CVV are returned in memory only.
+    ///
+    /// In test mode (`sk_test_…`), cardholders and cards are created immediately
+    /// with no approval. In production, Stripe Issuing access must be enabled on
+    /// your Stripe account first.
+    ///
+    /// TODO(production): replace the hardcoded placeholder cardholder data with
+    /// real user name and billing address from the user's profile.
+    #[instrument(skip(self, customer_id, _payment_method_id), fields(
+        stripe_key_len = self.stripe_key.len(),
+        amount_cents,
+        currency
+    ))]
+    pub async fn create_booking_card(
+        &self,
+        customer_id: &str,
+        // Reserved for charging the customer's stored PM via PaymentIntent before
+        // the booking is submitted (full charge flow to be added in a follow-up).
+        _payment_method_id: &str,
+        amount_cents: u64,
+        currency: &str,
+    ) -> Result<IssuingCard> {
+        // Step 1: Create a cardholder.
+        // Production: persist cardholder_id per customer and reuse.
+        info!("creating Stripe Issuing cardholder for customer {customer_id}");
+        let terms_date = "1640995200"; // 2022-01-01 — placeholder for terms acceptance
+        let ch_resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/issuing/cardholders"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .form(&[
+                ("name", "Silvie Traveler"),
+                ("type", "individual"),
+                ("email", "traveler@silvie.app"),
+                ("billing[address][line1]", "123 Main St"),
+                ("billing[address][city]", "San Francisco"),
+                ("billing[address][state]", "CA"),
+                ("billing[address][postal_code]", "94105"),
+                ("billing[address][country]", "US"),
+                (
+                    "individual[card_issuing][user_terms_acceptance][date]",
+                    terms_date,
+                ),
+                (
+                    "individual[card_issuing][user_terms_acceptance][ip]",
+                    "127.0.0.1",
+                ),
+            ])
+            .send()
+            .await?;
+
+        let status = ch_resp.status();
+        let body = ch_resp.text().await?;
+        debug!("Stripe cardholder status: {status}");
+        if !status.is_success() {
+            error!("Stripe cardholder creation error ({status}): {body}");
+            return Err(anyhow!("Stripe cardholder creation failed: HTTP {status}"));
+        }
+        let cardholder: StripeCardholder = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse cardholder: {e}"))?;
+
+        // Step 2: Issue a virtual card with a spending limit = the booking total.
+        info!("issuing Stripe virtual card (amount={amount_cents} {currency})");
+        let amount_str = amount_cents.to_string();
+        let card_resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/issuing/cards"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .form(&[
+                ("type", "virtual"),
+                ("cardholder", cardholder.id.as_str()),
+                ("currency", currency),
+                (
+                    "spending_controls[spending_limits][0][amount]",
+                    amount_str.as_str(),
+                ),
+                (
+                    "spending_controls[spending_limits][0][interval]",
+                    "all_time",
+                ),
+                ("expand[]", "number"),
+                ("expand[]", "cvc"),
+            ])
+            .send()
+            .await?;
+
+        let status = card_resp.status();
+        let body = card_resp.text().await?;
+        debug!("Stripe Issuing card status: {status}");
+        if !status.is_success() {
+            error!("Stripe Issuing card error ({status}): {body}");
+            return Err(anyhow!("Stripe Issuing card creation failed: HTTP {status}"));
+        }
+
+        let card: StripeIssuingCard = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse issuing card: {e}"))?;
+
+        let pan = card
+            .number
+            .ok_or_else(|| anyhow!("Stripe did not expand card number — check expand[]=number"))?;
+        let cvv = card
+            .cvc
+            .ok_or_else(|| anyhow!("Stripe did not expand CVC — check expand[]=cvc"))?;
+
+        Ok(IssuingCard {
+            id: card.id,
+            pan,
+            exp_month: card.exp_month,
+            exp_year: card.exp_year,
+            cvv,
+        })
+    }
+
+    /// Cancels a Stripe Issuing card after use, ensuring single-use semantics.
+    /// Always called after a booking attempt, whether it succeeded or failed.
+    #[instrument(skip(self), fields(stripe_key_len = self.stripe_key.len(), card_id))]
+    pub async fn cancel_issuing_card(&self, card_id: &str) -> Result<()> {
+        let resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/issuing/cards/{card_id}"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .form(&[("status", "canceled")])
+            .send()
+            .await?;
+
+        let status = resp.status();
+        debug!("cancel Issuing card status: {status}");
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            error!("Stripe cancel card error ({status}): {body}");
+            return Err(anyhow!("Failed to cancel Issuing card: HTTP {status}"));
+        }
+        info!("Stripe Issuing card {card_id} cancelled");
+        Ok(())
+    }
+}
+
+// ── HTTP handlers ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GetPaymentMethodRequest {
+    // Kept for future validation that the PM belongs to this customer.
+    #[allow(dead_code)]
+    customer_id: String,
+    payment_method_id: String,
+}
+
+/// POST /payment/setup — creates a Stripe Customer + SetupIntent.
+/// The frontend uses the returned `client_secret` with Stripe Elements to
+/// collect the card without it ever touching this server.
+#[handler]
+pub async fn payment_setup_handler(
+    Data(client): Data<&Arc<Option<PaymentClient>>>,
+) -> poem::Result<Json<SetupIntentResponse>> {
+    // `**client` dereferences &Arc<Option<…>> to get &Option<PaymentClient> as a place,
+    // then .as_ref() converts that to Option<&PaymentClient> without moving.
+    let client = (**client).as_ref().ok_or_else(|| {
+        poem::Error::from_status(StatusCode::SERVICE_UNAVAILABLE)
+    })?;
+
+    client.create_setup_intent().await.map(Json).map_err(|e| {
+        error!("payment setup failed: {e:#}");
+        poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
+    })
+}
+
+/// POST /payment/method — retrieves display-safe card metadata (last4, brand,
+/// expiry) for a PaymentMethod that the frontend just confirmed via Stripe Elements.
+#[handler]
+pub async fn payment_method_handler(
+    Data(client): Data<&Arc<Option<PaymentClient>>>,
+    Json(req): Json<GetPaymentMethodRequest>,
+) -> poem::Result<Json<PaymentMethodDetails>> {
+    let client = (**client).as_ref().ok_or_else(|| {
+        poem::Error::from_status(StatusCode::SERVICE_UNAVAILABLE)
+    })?;
+
+    client
+        .get_payment_method_details(&req.payment_method_id)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get payment method failed: {e:#}");
+            poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
+        })
+}

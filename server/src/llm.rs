@@ -14,7 +14,7 @@ use crate::tools::google_calendar::{
     CreateCalendarEventTool, DeleteCalendarEventTool, FindFreeTimeTool, GoogleCalendarTool,
     RespondToEventTool, UpdateCalendarEventTool,
 };
-use crate::tools::travelport::HotelSearchTool;
+use crate::tools::travelport::{HotelBookTool, HotelSearchTool};
 use crate::types::{ChatMessage, Role};
 
 const MODEL: &str = "gemini-3.1-flash-lite";
@@ -51,6 +51,8 @@ impl LlmClient {
         google_access_token: Option<String>,
         timezone: Option<String>,
         current_datetime: Option<String>,
+        stripe_customer_id: Option<String>,
+        stripe_payment_method_id: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let (system_prompt, history, prompt) = split_history(&messages)?;
 
@@ -74,10 +76,10 @@ impl LlmClient {
             tools.push(Box::new(FindFreeTimeTool::new(token)));
         }
 
-        // Conditionally add hotel search tool if Travelport credentials are configured
+        // Conditionally add hotel tools if Travelport credentials are configured
         let tp_client_id = std::env::var("TRAVELPORT_CLIENT_ID").ok();
         let tp_client_secret = std::env::var("TRAVELPORT_CLIENT_SECRET").ok();
-        if let (Some(client_id), Some(client_secret)) = (tp_client_id, tp_client_secret) {
+        if let (Some(tp_id), Some(tp_secret)) = (tp_client_id, tp_client_secret) {
             let hotel_preamble = include_str!("../prompts/travelport/preamble.md");
             if preamble.is_empty() {
                 preamble = hotel_preamble.to_string();
@@ -85,7 +87,19 @@ impl LlmClient {
                 preamble.push_str("\n\n");
                 preamble.push_str(hotel_preamble);
             }
-            tools.push(Box::new(HotelSearchTool::new(client_id, client_secret)));
+            tools.push(Box::new(HotelSearchTool::new(tp_id.clone(), tp_secret.clone())));
+
+            // Hotel booking requires Stripe + a stored payment method from the user's keychain
+            let stripe_key = std::env::var("STRIPE_SECRET_KEY").ok();
+            if let (Some(sk), Some(customer_id), Some(pm_id)) = (
+                stripe_key,
+                stripe_customer_id,
+                stripe_payment_method_id,
+            ) {
+                tools.push(Box::new(HotelBookTool::new(
+                    tp_id, tp_secret, sk, customer_id, pm_id,
+                )));
+            }
         }
 
         let mut builder = self.client.agent(MODEL);

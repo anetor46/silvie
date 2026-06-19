@@ -1,5 +1,6 @@
 mod chat;
 mod llm;
+mod payments;
 mod server;
 mod settings;
 mod tools;

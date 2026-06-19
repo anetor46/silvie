@@ -1,6 +1,8 @@
 mod auth;
+mod payment;
 
 use auth::ConnectedAccount;
+use payment::StoredPaymentMethod;
 use tauri::State;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -45,6 +47,21 @@ async fn get_google_access_token(config: State<'_, OAuthConfig>) -> Result<Optio
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn store_payment_method(data: StoredPaymentMethod) -> Result<(), String> {
+    payment::store_payment_method(&data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_payment_method() -> Option<StoredPaymentMethod> {
+    payment::load_payment_method()
+}
+
+#[tauri::command]
+fn remove_payment_method() -> Result<(), String> {
+    payment::remove_payment_method().map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialise tracing → logs appear in the terminal running `pnpm tauri dev`.
@@ -74,6 +91,9 @@ pub fn run() {
             get_google_calendar_account,
             disconnect_google_calendar,
             get_google_access_token,
+            store_payment_method,
+            get_payment_method,
+            remove_payment_method,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

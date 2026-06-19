@@ -20,6 +20,10 @@ pub struct ChatRequest {
     pub google_access_token: Option<String>,
     pub timezone: Option<String>,
     pub current_datetime: Option<String>,
+    /// Stripe Customer ID stored in the user's OS keychain. Required for hotel booking.
+    pub stripe_customer_id: Option<String>,
+    /// Stripe PaymentMethod ID stored in the user's OS keychain. Required for hotel booking.
+    pub stripe_payment_method_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

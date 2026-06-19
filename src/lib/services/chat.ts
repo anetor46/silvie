@@ -33,8 +33,10 @@ const BASE_URL =
 
 export interface ChatOptions {
   googleAccessToken?: string | null;
-  timezone?: string;        // IANA name, e.g. "Europe/Paris"
-  currentDatetime?: string; // ISO 8601 with local offset, e.g. "2026-06-19T14:32:00+02:00"
+  timezone?: string;               // IANA name, e.g. "Europe/Paris"
+  currentDatetime?: string;        // ISO 8601 with local offset, e.g. "2026-06-19T14:32:00+02:00"
+  stripeCustomerId?: string | null;
+  stripePaymentMethodId?: string | null;
 }
 
 export function streamChat(
@@ -53,6 +55,8 @@ export function streamChat(
         google_access_token: opts?.googleAccessToken ?? null,
         timezone: opts?.timezone ?? null,
         current_datetime: opts?.currentDatetime ?? null,
+        stripe_customer_id: opts?.stripeCustomerId ?? null,
+        stripe_payment_method_id: opts?.stripePaymentMethodId ?? null,
       }),
       signal: controller.signal,
     });
