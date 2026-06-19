@@ -5,7 +5,8 @@ const config = {
 	preprocess: vitePreprocess(),
 	kit: {
 		adapter: adapter({
-			fallback: 'index.html',
+			// Served by Cloudflare Pages for any 404 response.
+			fallback: '404.html',
 		}),
 		files: {
 			// Share static assets (favicon, logo) with the main app — single source of truth.

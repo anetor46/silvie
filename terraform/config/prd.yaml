@@ -1,0 +1,15 @@
+vpc:
+  cidr: 10.0.0.16
+  subnets:
+    - az: a
+      private_cidr: 10.0.0.0/18
+      public_cidr: 10.0.64.0/18
+    - az: b
+      private_cidr: 10.0.128.0/18
+      public_cidr: 10.0.192.0/18
+server:
+  port: 8080
+  cpu: 512
+  memory: 1024
+  min_capacity: 1
+  max_capacity: 2

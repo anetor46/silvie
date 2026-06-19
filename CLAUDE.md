@@ -110,6 +110,10 @@ Both crates have `tracing` + `tracing-subscriber` wired up. New Rust code must i
 
 See `src-tauri/src/auth.rs` for a reference implementation following all these rules.
 
+## Terraform
+
+- NEVER apply the terraform code.
+
 ## Conventions
 
 - SvelteKit static adapter — no server-side rendering; the build output is a static bundle consumed by Tauri.
