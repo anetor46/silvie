@@ -101,7 +101,7 @@
   }
 
   .page::-webkit-scrollbar-thumb {
-    background: #2a2a2a;
+    background: var(--border-strong);
     border-radius: 3px;
   }
 
@@ -113,13 +113,14 @@
   .title {
     font-size: 24px;
     font-weight: 700;
-    color: #ffffff;
+    color: var(--text-primary);
     margin-bottom: 6px;
+    letter-spacing: -0.01em;
   }
 
   .subtitle {
     font-size: 14px;
-    color: #555;
+    color: var(--text-secondary);
   }
 
   section {
@@ -135,7 +136,7 @@
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #444;
+    color: var(--purple-600);
     margin-bottom: 14px;
   }
 
@@ -146,7 +147,7 @@
   .day-label {
     font-size: 12px;
     font-weight: 600;
-    color: #888;
+    color: var(--text-muted);
     padding: 0 4px 8px;
   }
 
@@ -158,7 +159,7 @@
 
   .empty {
     font-size: 13px;
-    color: #444;
+    color: var(--text-dim);
     padding: 8px 4px;
   }
 </style>

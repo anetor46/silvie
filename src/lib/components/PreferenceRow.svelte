@@ -41,7 +41,7 @@
     flex-direction: column;
     gap: 12px;
     padding: 18px 0;
-    border-bottom: 1px solid #1a1a1a;
+    border-bottom: 1px solid var(--border);
   }
 
   .row:last-child {
@@ -51,13 +51,13 @@
   .label {
     font-size: 14px;
     font-weight: 600;
-    color: #e8e8e8;
+    color: var(--text-primary);
     margin-bottom: 2px;
   }
 
   .desc {
     font-size: 12px;
-    color: #555;
+    color: var(--text-muted);
   }
 
   .options {
@@ -72,16 +72,17 @@
     font-size: 13px;
     font-weight: 500;
     font-family: inherit;
-    background: #141414;
-    color: #aaa;
-    border: 1px solid #2a2a2a;
+    background: var(--bg);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
     cursor: pointer;
     transition: border-color 0.15s, color 0.15s, background 0.15s;
   }
 
   .chip:hover {
-    border-color: #555;
-    color: #e8e8e8;
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+    background: var(--surface);
   }
 
   .chip.active {

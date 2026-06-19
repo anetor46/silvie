@@ -41,7 +41,7 @@
   }
 
   .page::-webkit-scrollbar-thumb {
-    background: #2a2a2a;
+    background: var(--border-strong);
     border-radius: 3px;
   }
 
@@ -53,13 +53,14 @@
   .title {
     font-size: 24px;
     font-weight: 700;
-    color: #ffffff;
+    color: var(--text-primary);
     margin-bottom: 6px;
+    letter-spacing: -0.01em;
   }
 
   .subtitle {
     font-size: 14px;
-    color: #555;
+    color: var(--text-secondary);
   }
 
   .categories {

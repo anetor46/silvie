@@ -106,7 +106,7 @@
   }
 
   .chat-area::-webkit-scrollbar-thumb {
-    background: #2a2a2a;
+    background: var(--border-strong);
     border-radius: 3px;
   }
 </style>

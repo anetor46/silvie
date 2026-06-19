@@ -87,14 +87,15 @@
     align-items: center;
     gap: 14px;
     padding: 14px 16px;
-    background: #141414;
-    border: 1px solid #1f1f1f;
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: 12px;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, background 0.15s;
   }
 
   .card:hover {
-    border-color: #2a2a2a;
+    border-color: var(--border-strong);
+    background: var(--surface);
   }
 
   .provider-icon {
@@ -120,13 +121,13 @@
 
   .provider-name {
     font-size: 14px;
-    color: #d4d4d4;
+    color: var(--text-primary);
     font-weight: 500;
   }
 
   .provider-email {
     font-size: 12px;
-    color: #555;
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -136,13 +137,13 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #4ade80;
+    background: var(--success);
     flex-shrink: 0;
   }
 
   .coming-soon {
     font-size: 12px;
-    color: #383838;
+    color: var(--text-dim);
     font-style: italic;
     flex-shrink: 0;
   }
@@ -154,7 +155,7 @@
     font-weight: 500;
     font-family: inherit;
     cursor: pointer;
-    transition: opacity 0.15s, background 0.15s;
+    transition: opacity 0.15s, background 0.15s, border-color 0.15s, color 0.15s;
     border: none;
     flex-shrink: 0;
     min-width: 88px;
@@ -169,23 +170,24 @@
   }
 
   .btn.connect {
-    background: linear-gradient(135deg, #7c5cfc, #4f8ef7);
+    background: var(--purple-600);
     color: #fff;
   }
 
   .btn.connect:hover:not(:disabled) {
-    opacity: 0.85;
+    background: var(--purple-800);
   }
 
   .btn.disconnect {
-    background: #1f1f1f;
-    color: #888;
-    border: 1px solid #2a2a2a;
+    background: var(--bg);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
   }
 
   .btn.disconnect:hover:not(:disabled) {
-    background: #2a2a2a;
-    color: #ccc;
+    background: var(--surface);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
   }
 
   .spinner {
@@ -205,7 +207,7 @@
 
   .error-msg {
     font-size: 12px;
-    color: #f87171;
+    color: var(--error);
     margin-top: 6px;
     padding: 0 4px;
   }

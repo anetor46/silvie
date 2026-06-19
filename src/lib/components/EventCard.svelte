@@ -52,25 +52,26 @@
     align-items: flex-start;
     gap: 12px;
     padding: 12px 14px;
-    background: #141414;
-    border: 1px solid #1f1f1f;
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: 10px;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, background 0.15s;
   }
 
   .card:hover {
-    border-color: #2a2a2a;
+    border-color: var(--border-strong);
+    background: var(--surface);
   }
 
   .card.past {
-    opacity: 0.55;
+    opacity: 0.6;
   }
 
   .icon {
     width: 32px;
     height: 32px;
     border-radius: 8px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent);
     display: flex;
     align-items: center;
@@ -93,7 +94,7 @@
   .title {
     font-size: 14px;
     font-weight: 500;
-    color: #e8e8e8;
+    color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -101,14 +102,14 @@
 
   .time {
     font-size: 12px;
-    color: #666;
+    color: var(--text-muted);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
 
   .sub {
     font-size: 12px;
-    color: #666;
+    color: var(--text-muted);
     margin-top: 3px;
   }
 </style>

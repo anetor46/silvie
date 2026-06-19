@@ -1,4 +1,6 @@
 <script lang="ts">
+  import BrandMark from './BrandMark.svelte';
+
   let {
     suggestions,
     onSuggestionClick,
@@ -9,7 +11,9 @@
 </script>
 
 <div class="empty-state">
-  <div class="silvie-glyph">S</div>
+  <div class="brand-glyph">
+    <BrandMark size={56} radius={14} />
+  </div>
   <h1 class="empty-title">Good to have you back.</h1>
   <p class="empty-sub">Ask me anything about your trips, meetings, or logistics.</p>
   <div class="suggestions">
@@ -32,31 +36,22 @@
     text-align: center;
   }
 
-  .silvie-glyph {
-    width: 56px;
-    height: 56px;
-    border-radius: 16px;
-    background: linear-gradient(135deg, #7c5cfc, #4f8ef7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 26px;
-    font-weight: 700;
-    color: #fff;
+  .brand-glyph {
     margin-bottom: 20px;
     flex-shrink: 0;
+    line-height: 0;
   }
 
   .empty-title {
     font-size: 22px;
     font-weight: 600;
-    color: #ffffff;
+    color: var(--text-primary);
     margin-bottom: 8px;
   }
 
   .empty-sub {
     font-size: 14px;
-    color: #666;
+    color: var(--text-muted);
     margin-bottom: 28px;
     max-width: 320px;
   }
@@ -71,9 +66,9 @@
 
   .suggestion-chip {
     padding: 8px 14px;
-    border: 1px solid #2a2a2a;
-    background: #141414;
-    color: #aaa;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-secondary);
     border-radius: 20px;
     font-size: 13px;
     cursor: pointer;
@@ -83,8 +78,8 @@
   }
 
   .suggestion-chip:hover {
-    border-color: #555;
-    color: #e8e8e8;
-    background: #1f1f1f;
+    border-color: var(--purple-400);
+    color: var(--purple-600);
+    background: var(--purple-50);
   }
 </style>

@@ -2,6 +2,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { conversations } from '$lib/stores/conversations.svelte';
+  import BrandMark from './BrandMark.svelte';
 
   let {
     open = $bindable(false),
@@ -55,7 +56,10 @@
 <!-- Drawer -->
 <nav class="sidebar" class:open aria-label="App menu">
   <div class="sidebar-header">
-    <div class="sidebar-wordmark">Silvie</div>
+    <div class="sidebar-brand">
+      <BrandMark size={22} radius={5} />
+      <span class="sidebar-wordmark">Silvie</span>
+    </div>
     <button class="close-btn" onclick={() => (open = false)} aria-label="Close menu">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <line x1="18" y1="6" x2="6" y2="18" />
@@ -115,7 +119,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(26, 26, 46, 0.4);
     z-index: 99;
     animation: fade-in 0.2s ease;
     cursor: default;
@@ -132,8 +136,8 @@
     left: 0;
     height: 100vh;
     width: 240px;
-    background: #111111;
-    border-right: 1px solid #1f1f1f;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
     z-index: 100;
     display: flex;
     flex-direction: column;
@@ -151,15 +155,21 @@
     justify-content: space-between;
     padding: 0 12px 0 16px;
     height: 52px;
-    border-bottom: 1px solid #1f1f1f;
+    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
+  }
+
+  .sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .sidebar-wordmark {
     font-size: 15px;
     font-weight: 600;
-    letter-spacing: 0.04em;
-    color: #ffffff;
+    letter-spacing: 0.02em;
+    color: var(--text-primary);
   }
 
   .close-btn {
@@ -170,15 +180,15 @@
     height: 32px;
     border: none;
     background: transparent;
-    color: #666;
+    color: var(--text-muted);
     border-radius: 8px;
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
 
   .close-btn:hover {
-    background: #1f1f1f;
-    color: #e8e8e8;
+    background: var(--surface-hover);
+    color: var(--purple-600);
   }
 
   /* New chat button */
@@ -188,20 +198,21 @@
     gap: 10px;
     margin: 12px 8px 6px;
     padding: 9px 12px;
-    background: transparent;
-    border: 1px solid #2a2a2a;
-    color: #e8e8e8;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
     font-family: inherit;
     font-size: 13px;
     font-weight: 500;
     border-radius: 8px;
     cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
   }
 
   .new-chat-btn:hover {
-    background: #1f1f1f;
-    border-color: #3a3a3a;
+    background: var(--purple-50);
+    border-color: var(--purple-400);
+    color: var(--purple-600);
   }
 
   /* Conversations scroll area */
@@ -217,7 +228,7 @@
   }
 
   .conversations::-webkit-scrollbar-thumb {
-    background: #2a2a2a;
+    background: var(--border-strong);
     border-radius: 3px;
   }
 
@@ -226,13 +237,13 @@
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #444;
+    color: var(--text-dim);
     padding: 6px 10px 4px;
   }
 
   .empty-hint {
     font-size: 12px;
-    color: #444;
+    color: var(--text-dim);
     padding: 8px 10px;
   }
 
@@ -249,7 +260,7 @@
     padding: 8px 10px;
     background: transparent;
     border: none;
-    color: #999;
+    color: var(--text-secondary);
     font-family: inherit;
     font-size: 13px;
     border-radius: 6px;
@@ -261,13 +272,14 @@
   }
 
   .conv-item:hover {
-    background: #1a1a1a;
-    color: #e8e8e8;
+    background: var(--surface-2);
+    color: var(--text-primary);
   }
 
   .conv-item.active {
-    background: #1f1f1f;
-    color: #ffffff;
+    background: var(--purple-50);
+    color: var(--purple-600);
+    font-weight: 500;
   }
 
   /* Bottom nav (Connectors, Preferences) */
@@ -277,7 +289,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    border-top: 1px solid #1f1f1f;
+    border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
 
@@ -287,7 +299,7 @@
     gap: 10px;
     padding: 9px 10px;
     border-radius: 8px;
-    color: #888;
+    color: var(--text-secondary);
     font-size: 14px;
     font-weight: 500;
     text-decoration: none;
@@ -295,12 +307,12 @@
   }
 
   .nav-item:hover {
-    background: #1f1f1f;
-    color: #e8e8e8;
+    background: var(--surface-2);
+    color: var(--text-primary);
   }
 
   .nav-item.active {
-    background: #1a1a1a;
-    color: #ffffff;
+    background: var(--purple-50);
+    color: var(--purple-600);
   }
 </style>

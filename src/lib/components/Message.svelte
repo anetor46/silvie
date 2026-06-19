@@ -1,13 +1,16 @@
 <script lang="ts">
   import type { Message } from '$lib/types';
   import { marked } from 'marked';
+  import BrandMark from './BrandMark.svelte';
 
   let { message }: { message: Message } = $props();
 </script>
 
 <div class="message {message.role}">
   {#if message.role === 'assistant'}
-    <div class="avatar">S</div>
+    <div class="avatar">
+      <BrandMark size={30} radius={7} />
+    </div>
   {/if}
   <div class="bubble">
     {#if message.role === 'assistant'}
@@ -32,16 +35,9 @@
   .avatar {
     width: 30px;
     height: 30px;
-    border-radius: 8px;
-    background: linear-gradient(135deg, #7c5cfc, #4f8ef7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 13px;
-    font-weight: 700;
-    color: #fff;
     flex-shrink: 0;
     margin-top: 2px;
+    line-height: 0;
   }
 
   .bubble {
@@ -51,15 +47,15 @@
   }
 
   .message.user .bubble {
-    background: #1f1f1f;
-    border: 1px solid #2a2a2a;
+    background: var(--purple-50);
+    border: 1px solid var(--border);
     padding: 10px 14px;
     border-radius: 16px 4px 16px 16px;
-    color: #e8e8e8;
+    color: var(--text-primary);
   }
 
   .message.assistant .bubble {
-    color: #d4d4d4;
+    color: var(--text-primary);
     padding: 4px 0;
   }
 
@@ -77,7 +73,7 @@
   .message.assistant .bubble :global(h4),
   .message.assistant .bubble :global(h5),
   .message.assistant .bubble :global(h6) {
-    color: #e8e8e8;
+    color: var(--text-primary);
     font-weight: 600;
     margin: 1em 0 0.4em;
     line-height: 1.3;
@@ -98,16 +94,16 @@
   .message.assistant .bubble :global(code) {
     font-family: 'Menlo', 'Consolas', monospace;
     font-size: 0.85em;
-    background: #1a1a1a;
-    border: 1px solid #2e2e2e;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 1px 5px;
-    color: #c9d1d9;
+    color: var(--purple-800);
   }
 
   .message.assistant .bubble :global(pre) {
-    background: #141414;
-    border: 1px solid #2e2e2e;
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px 14px;
     margin: 0.75em 0;
@@ -118,30 +114,30 @@
     border: none;
     padding: 0;
     font-size: 0.82em;
-    color: #c9d1d9;
+    color: var(--text-primary);
     line-height: 1.5;
   }
 
   .message.assistant .bubble :global(blockquote) {
-    border-left: 3px solid #7c5cfc;
+    border-left: 3px solid var(--purple-400);
     margin: 0.5em 0;
     padding: 0.25em 0 0.25em 1em;
-    color: #9ca3af;
+    color: var(--text-secondary);
   }
 
   .message.assistant .bubble :global(hr) {
     border: none;
-    border-top: 1px solid #2a2a2a;
+    border-top: 1px solid var(--border);
     margin: 1em 0;
   }
 
   .message.assistant .bubble :global(strong) {
-    color: #e8e8e8;
+    color: var(--text-primary);
     font-weight: 600;
   }
 
   .message.assistant .bubble :global(a) {
-    color: #7c5cfc;
+    color: var(--purple-600);
     text-decoration: none;
   }
   .message.assistant .bubble :global(a:hover) {
@@ -149,6 +145,6 @@
   }
 
   .message.assistant .bubble :global(del) {
-    color: #6b7280;
+    color: var(--text-dim);
   }
 </style>

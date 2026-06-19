@@ -1,4 +1,6 @@
 <script lang="ts">
+  import BrandMark from './BrandMark.svelte';
+
   let { onMenuClick }: { onMenuClick: () => void } = $props();
 </script>
 
@@ -11,7 +13,10 @@
     </svg>
   </button>
 
-  <span class="wordmark">Silvie</span>
+  <div class="brand">
+    <BrandMark size={22} radius={5} />
+    <span class="wordmark">Silvie</span>
+  </div>
 
   <button class="icon-btn account-btn" aria-label="Account">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -28,15 +33,22 @@
     justify-content: space-between;
     padding: 0 16px;
     height: 52px;
-    border-bottom: 1px solid #1f1f1f;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .wordmark {
     font-size: 15px;
     font-weight: 600;
-    letter-spacing: 0.04em;
-    color: #ffffff;
+    letter-spacing: 0.02em;
+    color: var(--text-primary);
   }
 
   .icon-btn {
@@ -47,23 +59,23 @@
     height: 36px;
     border: none;
     background: transparent;
-    color: #888;
+    color: var(--text-muted);
     border-radius: 8px;
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
 
   .icon-btn:hover {
-    background: #1f1f1f;
-    color: #e8e8e8;
+    background: var(--surface-hover);
+    color: var(--purple-600);
   }
 
   .account-btn {
-    border: 1.5px solid #2a2a2a;
+    border: 1.5px solid var(--border-strong);
     border-radius: 50%;
   }
 
   .account-btn:hover {
-    border-color: #444;
+    border-color: var(--purple-400);
   }
 </style>

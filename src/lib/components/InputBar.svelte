@@ -42,24 +42,26 @@
   .input-bar {
     padding: 12px 16px 16px;
     flex-shrink: 0;
-    border-top: 1px solid #1a1a1a;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
   }
 
   .input-wrapper {
     display: flex;
     align-items: flex-end;
     gap: 10px;
-    background: #141414;
-    border: 1px solid #2a2a2a;
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 14px;
     padding: 10px 12px;
     max-width: 720px;
     margin: 0 auto;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, background 0.15s;
   }
 
   .input-wrapper:focus-within {
-    border-color: #444;
+    border-color: var(--purple-400);
+    background: var(--bg);
   }
 
   .input {
@@ -67,7 +69,7 @@
     background: transparent;
     border: none;
     outline: none;
-    color: #e8e8e8;
+    color: var(--text-primary);
     font-size: 14px;
     font-family: inherit;
     line-height: 1.6;
@@ -77,7 +79,7 @@
   }
 
   .input::placeholder {
-    color: #444;
+    color: var(--text-dim);
   }
 
   .send-btn {
@@ -88,26 +90,26 @@
     height: 32px;
     border: none;
     border-radius: 8px;
-    background: linear-gradient(135deg, #7c5cfc, #4f8ef7);
+    background: var(--purple-600);
     color: #fff;
     cursor: pointer;
     flex-shrink: 0;
-    transition: opacity 0.15s;
+    transition: background 0.15s, opacity 0.15s;
   }
 
   .send-btn:disabled {
-    opacity: 0.25;
+    opacity: 0.3;
     cursor: default;
   }
 
   .send-btn:not(:disabled):hover {
-    opacity: 0.85;
+    background: var(--purple-800);
   }
 
   .disclaimer {
     text-align: center;
     font-size: 11px;
-    color: #333;
+    color: var(--text-dim);
     margin-top: 8px;
     max-width: 720px;
     margin-left: auto;
