@@ -37,6 +37,14 @@ fn disconnect_google_calendar() -> Result<(), String> {
     auth::remove_google_account().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_google_access_token(config: State<'_, OAuthConfig>) -> Result<Option<String>, String> {
+    tracing::info!("get_google_access_token called");
+    auth::get_fresh_access_token(&config.client_id, &config.client_secret)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialise tracing → logs appear in the terminal running `pnpm tauri dev`.
@@ -65,6 +73,7 @@ pub fn run() {
             start_google_oauth,
             get_google_calendar_account,
             disconnect_google_calendar,
+            get_google_access_token,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

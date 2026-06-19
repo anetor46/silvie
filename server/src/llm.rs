@@ -6,12 +6,18 @@ use rig::{
     completion::Message,
     providers::gemini,
     streaming::{StreamedAssistantContent, StreamingChat},
+    tool::ToolDyn,
 };
 use std::pin::Pin;
 
+use crate::calendar::GoogleCalendarTool;
 use crate::types::{ChatMessage, Role};
 
 const MODEL: &str = "gemini-3.1-flash-lite";
+
+const CALENDAR_PREAMBLE: &str =
+    "You have access to the user's Google Calendar via the get_calendar_events tool. \
+     Use it when the user asks about their schedule, meetings, or upcoming events.";
 
 pub struct LlmClient {
     client: gemini::Client,
@@ -25,20 +31,35 @@ impl LlmClient {
     }
 
     /// Stream a chat completion. Returns a Stream of text chunks.
+    /// If `google_access_token` is provided the agent gains a Google Calendar tool.
     pub async fn stream_chat(
         &self,
         messages: Vec<ChatMessage>,
+        google_access_token: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let (system_prompt, history, prompt) = split_history(&messages)?;
 
-        let mut builder = self.client.agent(MODEL);
+        // Build preamble: combine any user-supplied system message with the
+        // calendar tool notice (when a token is present).
+        let mut preamble = system_prompt.unwrap_or_default();
+        let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
 
-        if let Some(sys) = system_prompt {
-            builder = builder.preamble(&sys);
+        if let Some(token) = google_access_token {
+            if preamble.is_empty() {
+                preamble = CALENDAR_PREAMBLE.to_string();
+            } else {
+                preamble.push_str("\n\n");
+                preamble.push_str(CALENDAR_PREAMBLE);
+            }
+            tools.push(Box::new(GoogleCalendarTool::new(token)));
         }
 
-        let agent = builder.build();
+        let mut builder = self.client.agent(MODEL);
+        if !preamble.is_empty() {
+            builder = builder.preamble(&preamble);
+        }
 
+        let agent = builder.tools(tools).build();
         let stream = agent.stream_chat(prompt, history).await;
 
         let mapped = stream.filter_map(|item| async move {

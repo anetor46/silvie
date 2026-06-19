@@ -1,3 +1,4 @@
+mod calendar;
 mod chat;
 mod llm;
 mod server;

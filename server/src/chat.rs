@@ -32,7 +32,7 @@ pub async fn chat_handler(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseEvent>();
 
     tokio::spawn(async move {
-        match client.stream_chat(req.messages).await {
+        match client.stream_chat(req.messages, req.google_access_token).await {
             Ok(mut stream) => {
                 while let Some(item) = stream.next().await {
                     match item {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { conversations } from '$lib/stores/conversations.svelte';
   import { streamChat, type ChatMessage } from '$lib/services/chat';
+  import { getGoogleAccessToken } from '$lib/services/connectors';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import MessageList from '$lib/components/MessageList.svelte';
   import InputBar from '$lib/components/InputBar.svelte';
@@ -20,7 +21,7 @@
     setTimeout(() => messagesEl?.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' }), 10);
   }
 
-  function sendMessage() {
+  async function sendMessage() {
     const text = inputValue.trim();
     if (!text) return;
 
@@ -37,10 +38,16 @@
     const assistantId = conversations.startAssistantMessage();
     scrollToBottom();
 
-    const handle = streamChat(history, (chunk) => {
-      conversations.appendToAssistantMessage(assistantId, chunk);
-      scrollToBottom();
-    });
+    const googleAccessToken = await getGoogleAccessToken();
+
+    const handle = streamChat(
+      history,
+      (chunk) => {
+        conversations.appendToAssistantMessage(assistantId, chunk);
+        scrollToBottom();
+      },
+      { googleAccessToken },
+    );
     currentStream = handle;
 
     handle.done

@@ -31,9 +31,14 @@ type ServerEvent =
 const BASE_URL =
   (import.meta.env.VITE_SILVIE_SERVER_URL as string | undefined) ?? 'http://localhost:8080';
 
+export interface ChatOptions {
+  googleAccessToken?: string | null;
+}
+
 export function streamChat(
   messages: ChatMessage[],
   onToken: (text: string) => void,
+  opts?: ChatOptions,
 ): StreamHandle {
   const controller = new AbortController();
 
@@ -41,7 +46,10 @@ export function streamChat(
     const response = await fetch(`${BASE_URL}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({
+        messages,
+        google_access_token: opts?.googleAccessToken ?? null,
+      }),
       signal: controller.signal,
     });
 

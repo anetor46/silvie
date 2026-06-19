@@ -26,3 +26,10 @@ export async function disconnectGoogleCalendar(): Promise<void> {
   assertTauri();
   await invoke('disconnect_google_calendar');
 }
+
+export async function getGoogleAccessToken(): Promise<string | null> {
+  if (!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
+    return null;
+  }
+  return await invoke<string | null>('get_google_access_token');
+}

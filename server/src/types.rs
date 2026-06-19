@@ -17,6 +17,7 @@ pub struct ChatMessage {
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
+    pub google_access_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -89,6 +89,27 @@ The Claude Code built-in preview tool does not work with Tauri — always ask th
 
 Before claiming any Rust change is complete, run `cargo check --workspace` (or `cargo check -p <crate>` for a single crate). Type-checking is fast and catches the API-mismatch errors that are easy to introduce when writing against unfamiliar crates. Do not rely solely on inspection — always have the compiler verify.
 
+## Rust tracing conventions
+
+Both crates have `tracing` + `tracing-subscriber` wired up. New Rust code must instrument itself from the start — runtime failures are otherwise invisible.
+
+**Subscriber setup (already done — reference only)**
+- `src-tauri`: initialised in `run()` via `tracing_subscriber::fmt().with_env_filter(...)`, default filter `silvie=debug`
+- `server`: initialised in `main.rs`, same pattern
+- Override at runtime: `RUST_LOG=silvie=debug,silvie_server=debug`
+
+**Rules for new Rust code**
+- Add `#[instrument]` to every non-trivial `async fn`; use `skip(param)` for secrets and large types
+- Log entry of every Tauri command and HTTP handler at `info!`
+- HTTP calls: log URL + status at `debug!`; on **error** log the full response body at `error!`; on success body is `debug!` only (may be large)
+- Use `info!` for lifecycle milestones (server start, auth flow steps, keychain writes)
+- Use `debug!` for intermediate values useful during development
+- Use `warn!` for recoverable failures (timeouts, cancelled flows, retries)
+- Use `error!` for hard failures, always with the full error: `error!("thing failed: {e}")`
+- **Never log secret values** (tokens, API keys, passwords) — log lengths instead: `token_len = token.len()`
+
+See `src-tauri/src/auth.rs` for a reference implementation following all these rules.
+
 ## Conventions
 
 - SvelteKit static adapter — no server-side rendering; the build output is a static bundle consumed by Tauri.

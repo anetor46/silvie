@@ -8248,6 +8248,7 @@ name = "silvie"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dotenvy",
  "keyring",
  "oauth2",
@@ -8268,13 +8269,16 @@ name = "silvie-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "config",
  "dotenvy",
  "futures",
  "poem",
+ "reqwest 0.12.28",
  "rig",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tracing",
