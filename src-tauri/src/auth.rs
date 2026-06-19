@@ -75,7 +75,7 @@ pub async fn google_oauth_flow(
     let (auth_url, _csrf_token) = client
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new(
-            "https://www.googleapis.com/auth/calendar.events.readonly".to_string(),
+            "https://www.googleapis.com/auth/calendar.events".to_string(),
         ))
         .add_scope(Scope::new("email".to_string()))
         .add_scope(Scope::new("profile".to_string()))

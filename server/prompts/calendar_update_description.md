@@ -1,0 +1,1 @@
+Update an existing event in the user's Google Calendar. Use this to reschedule (change start/end time), rename, relocate, or edit the description of an event. Call get_calendar_events first to obtain the event_id. Only the fields you provide will be changed — omitted fields are left as-is.

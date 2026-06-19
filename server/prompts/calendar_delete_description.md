@@ -1,0 +1,1 @@
+Permanently delete an event from the user's Google Calendar and send cancellation emails to all attendees. Use this when the user asks to cancel or remove a meeting. Call get_calendar_events first to obtain the event_id. Ask for confirmation before deleting unless the request was unambiguous.

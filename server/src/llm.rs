@@ -10,7 +10,10 @@ use rig::{
 };
 use std::pin::Pin;
 
-use crate::calendar::GoogleCalendarTool;
+use crate::calendar::{
+    CreateCalendarEventTool, DeleteCalendarEventTool, GoogleCalendarTool, RespondToEventTool,
+    UpdateCalendarEventTool,
+};
 use crate::types::{ChatMessage, Role};
 
 const MODEL: &str = "gemini-3.1-flash-lite";
@@ -62,7 +65,11 @@ impl LlmClient {
                 preamble.push_str("\n\n");
                 preamble.push_str(&cal_preamble);
             }
-            tools.push(Box::new(GoogleCalendarTool::new(token)));
+            tools.push(Box::new(GoogleCalendarTool::new(token.clone())));
+            tools.push(Box::new(CreateCalendarEventTool::new(token.clone())));
+            tools.push(Box::new(UpdateCalendarEventTool::new(token.clone())));
+            tools.push(Box::new(DeleteCalendarEventTool::new(token.clone())));
+            tools.push(Box::new(RespondToEventTool::new(token)));
         }
 
         let mut builder = self.client.agent(MODEL);

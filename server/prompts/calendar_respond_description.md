@@ -1,0 +1,1 @@
+Accept, decline, or tentatively accept a calendar invitation on behalf of the user. Use this when the user asks to RSVP to a meeting invite. Call get_calendar_events first to obtain the event_id of the invitation. Valid response_status values: "accepted", "declined", "tentative".
