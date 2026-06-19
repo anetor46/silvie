@@ -15,9 +15,18 @@ use crate::types::{ChatMessage, Role};
 
 const MODEL: &str = "gemini-3.1-flash-lite";
 
-const CALENDAR_PREAMBLE: &str =
-    "You have access to the user's Google Calendar via the get_calendar_events tool. \
-     Use it when the user asks about their schedule, meetings, or upcoming events.";
+const CALENDAR_PREAMBLE_TEMPLATE: &str =
+    include_str!("../prompts/calendar_preamble.md");
+
+fn build_calendar_preamble(timezone: Option<&str>, current_datetime: Option<&str>) -> String {
+    let datetime_context = match (current_datetime, timezone) {
+        (Some(dt), Some(tz)) => format!("{dt} ({tz})"),
+        (Some(dt), None) => dt.to_string(),
+        _ => "unknown".to_string(),
+    };
+    CALENDAR_PREAMBLE_TEMPLATE
+        .replace("{{CURRENT_DATETIME}}", &datetime_context)
+}
 
 pub struct LlmClient {
     client: gemini::Client,
@@ -36,20 +45,22 @@ impl LlmClient {
         &self,
         messages: Vec<ChatMessage>,
         google_access_token: Option<String>,
+        timezone: Option<String>,
+        current_datetime: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let (system_prompt, history, prompt) = split_history(&messages)?;
 
-        // Build preamble: combine any user-supplied system message with the
-        // calendar tool notice (when a token is present).
         let mut preamble = system_prompt.unwrap_or_default();
         let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
 
         if let Some(token) = google_access_token {
+            let cal_preamble =
+                build_calendar_preamble(timezone.as_deref(), current_datetime.as_deref());
             if preamble.is_empty() {
-                preamble = CALENDAR_PREAMBLE.to_string();
+                preamble = cal_preamble;
             } else {
                 preamble.push_str("\n\n");
-                preamble.push_str(CALENDAR_PREAMBLE);
+                preamble.push_str(&cal_preamble);
             }
             tools.push(Box::new(GoogleCalendarTool::new(token)));
         }

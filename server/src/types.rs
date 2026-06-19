@@ -18,6 +18,8 @@ pub struct ChatMessage {
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     pub google_access_token: Option<String>,
+    pub timezone: Option<String>,
+    pub current_datetime: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

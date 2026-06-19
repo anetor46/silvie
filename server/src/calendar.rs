@@ -83,6 +83,8 @@ impl ApiEventTime {
     }
 }
 
+const TOOL_DESCRIPTION: &str = include_str!("../prompts/calendar_tool_description.md");
+
 impl Tool for GoogleCalendarTool {
     const NAME: &'static str = "get_calendar_events";
 
@@ -93,9 +95,7 @@ impl Tool for GoogleCalendarTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Retrieve events from the user's primary Google Calendar. \
-                Use this when the user asks about their schedule, meetings, or upcoming events."
-                .to_string(),
+            description: TOOL_DESCRIPTION.trim().to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

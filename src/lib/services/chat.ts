@@ -33,6 +33,8 @@ const BASE_URL =
 
 export interface ChatOptions {
   googleAccessToken?: string | null;
+  timezone?: string;        // IANA name, e.g. "Europe/Paris"
+  currentDatetime?: string; // ISO 8601 with local offset, e.g. "2026-06-19T14:32:00+02:00"
 }
 
 export function streamChat(
@@ -49,6 +51,8 @@ export function streamChat(
       body: JSON.stringify({
         messages,
         google_access_token: opts?.googleAccessToken ?? null,
+        timezone: opts?.timezone ?? null,
+        current_datetime: opts?.currentDatetime ?? null,
       }),
       signal: controller.signal,
     });

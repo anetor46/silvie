@@ -40,13 +40,24 @@
 
     const googleAccessToken = await getGoogleAccessToken();
 
+    const now = new Date();
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const offsetMin = -now.getTimezoneOffset();
+    const sign = offsetMin >= 0 ? '+' : '-';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const hh = pad(Math.floor(Math.abs(offsetMin) / 60));
+    const mm = pad(Math.abs(offsetMin) % 60);
+    const currentDatetime = new Date(now.getTime() - now.getTimezoneOffset() * 60_000)
+      .toISOString()
+      .replace('Z', `${sign}${hh}:${mm}`);
+
     const handle = streamChat(
       history,
       (chunk) => {
         conversations.appendToAssistantMessage(assistantId, chunk);
         scrollToBottom();
       },
-      { googleAccessToken },
+      { googleAccessToken, timezone, currentDatetime },
     );
     currentStream = handle;
 
