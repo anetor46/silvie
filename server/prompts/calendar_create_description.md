@@ -1,1 +1,0 @@
-Create a new event in the user's primary Google Calendar. Use this when the user asks to schedule a meeting, add an appointment, or block time. Always confirm the key details (title, time, attendees) with the user before calling this tool unless they were stated unambiguously.

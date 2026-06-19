@@ -1,9 +1,9 @@
-mod calendar;
 mod chat;
 mod llm;
 mod server;
-mod types;
 mod settings;
+mod tools;
+mod types;
 
 use std::env;
 use anyhow::{anyhow, Context, Result};

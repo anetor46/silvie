@@ -10,16 +10,16 @@ use rig::{
 };
 use std::pin::Pin;
 
-use crate::calendar::{
-    CreateCalendarEventTool, DeleteCalendarEventTool, GoogleCalendarTool, RespondToEventTool,
-    UpdateCalendarEventTool,
+use crate::tools::google_calendar::{
+    CreateCalendarEventTool, DeleteCalendarEventTool, FindFreeTimeTool, GoogleCalendarTool,
+    RespondToEventTool, UpdateCalendarEventTool,
 };
 use crate::types::{ChatMessage, Role};
 
 const MODEL: &str = "gemini-3.1-flash-lite";
 
 const CALENDAR_PREAMBLE_TEMPLATE: &str =
-    include_str!("../prompts/calendar_preamble.md");
+    include_str!("../prompts/google_calendar/preamble.md");
 
 fn build_calendar_preamble(timezone: Option<&str>, current_datetime: Option<&str>) -> String {
     let datetime_context = match (current_datetime, timezone) {
@@ -69,7 +69,8 @@ impl LlmClient {
             tools.push(Box::new(CreateCalendarEventTool::new(token.clone())));
             tools.push(Box::new(UpdateCalendarEventTool::new(token.clone())));
             tools.push(Box::new(DeleteCalendarEventTool::new(token.clone())));
-            tools.push(Box::new(RespondToEventTool::new(token)));
+            tools.push(Box::new(RespondToEventTool::new(token.clone())));
+            tools.push(Box::new(FindFreeTimeTool::new(token)));
         }
 
         let mut builder = self.client.agent(MODEL);
