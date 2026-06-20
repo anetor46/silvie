@@ -1,0 +1,30 @@
+# Auth0 configuration for the dev environment.
+# `${env}` is interpolated by terragrunt (templatefile).
+
+api:
+  name: "Silvie API (${env})"
+  identifier: "https://api.silvie.app/${env}"
+  token_lifetime: 86400  # 24h — access token lifetime
+
+native_app:
+  name: "Silvie (${env})"
+  description: "Silvie — AI chief of staff for business travel"
+  # One callback list covers all platforms:
+  #   - localhost:1421 → desktop (Tauri OAuth helper listener)
+  #   - com.silvie://  → iOS & Android (custom URL scheme matching bundle id)
+  callbacks:
+    - "http://localhost:1421/callback"
+    - "com.silvie://callback"
+  logout_urls:
+    - "http://localhost:1421/logout"
+    - "com.silvie://logout"
+  refresh_token:
+    rotation_type: "rotating"          # rotate refresh token on every use
+    expiration_type: "expiring"        # finite lifetime
+    token_lifetime: 2592000            # 30 days absolute
+    idle_token_lifetime: 1296000       # 15 days idle
+
+database_connection:
+  name: "silvie-${env}-users"
+  password_policy: "good"              # one of: none / low / fair / good / excellent
+  password_min_length: 12

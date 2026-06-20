@@ -35,4 +35,4 @@ COPY /server/config ./config
 
 EXPOSE 8080
 
-ENTRYPOINT ["silvie-server"]
+CMD ["silvie-server"]

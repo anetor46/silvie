@@ -1,0 +1,28 @@
+[tools]
+terragrunt = "1.0.3"
+opentofu = "1.11.6"
+pnpm = "11.0.3"
+
+[env]
+_.file = ".env"
+
+[tasks.docker-server]
+description = "Run server locally"
+run = "docker compose up --build"
+
+
+[tasks.tauri-dev]
+description = "Run app locally"
+run = "pnpm tauri dev"
+
+[tasks.tg-auth0-init]
+dir = "./infra/terraform/auth0"
+run = "terragrunt init --reconfigure"
+
+[tasks.tg-auth0-plan]
+dir = "./infra/terraform/auth0"
+run = "terragrunt plan"
+
+[tasks.tg-auth0-apply]
+dir = "./infra/terraform/auth0"
+run = "terragrunt apply"

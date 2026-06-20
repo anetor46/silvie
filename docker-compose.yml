@@ -10,6 +10,13 @@ services:
     environment:
       PORT: "8080"
       RUST_LOG: "info,silvie_server=debug"
+      S3_BUCKET: test-bucket
+      AWS_REGION: us-east-2
+      AWS_ENDPOINT_URL: "http://aws:4566"
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      GEMINY_API_KEY: ${GEMINY_API_KEY}
+      DATABASE_URL: postgres://root:test@postgres:12345/silvie
     env_file:
       - .env
     healthcheck:
@@ -17,4 +24,44 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
+      start_period: 5s
+    volumes:
+      - "./infra/.shared:/shared"
+  postgres:
+    container_name: postgres
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: silvie
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: test
+    ports:
+      - "12345:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=test pg_isready -U root -d silvie"]
+      interval: 5s
+      timeout: 1s
+      retries: 5
+    volumes:
+      - "./db/sql:/docker-entrypoint-initdb.d/"
+      - "./db/.data:/var/lib/postgresql"
+  aws:
+    container_name: aws
+    image: localstack/localstack:4
+    ports:
+      - "127.0.0.1:4566:4566"            # LocalStack Gateway
+      - "127.0.0.1:4510-4559:4510-4559"  # external services port range
+    environment:
+      DEBUG: 1
+      DEFAULT_REGION: us-east-2
+      SERVICES: iam,sts,s3,kms,cognito
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./infra/localstack/:/etc/localstack/init/"
+      - "./infra/.shared:/shared"
+    healthcheck:
+      test:  >-
+        curl -sf localhost:4566/_localstack/init/ready | grep -q '"completed": true,'
+      interval: 10s
+      timeout: 2s
+      retries: 5
       start_period: 5s

@@ -1,7 +1,7 @@
 locals {
   project       = "silvie"
   region        = get_env("TG_REGION", "us-east-2")
-  env           = get_env("TG_ENV", "prd")
+  env           = get_env("TG_ENV", "dev")
   account_id    = 269494629935
   params        = yamldecode(
     templatefile(

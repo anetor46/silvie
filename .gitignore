@@ -15,6 +15,7 @@ vite.config.ts.timestamp-*
 .terraform
 .terragrunt-cache
 build
+.data
 
 # Rust workspace target dir (shared between src-tauri and server)
 /target
