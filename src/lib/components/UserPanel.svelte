@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { loadStripe, type Stripe, type StripeElements } from '@stripe/stripe-js';
   import { userInfo } from '$lib/stores/user-info.svelte';
   import { user } from '$lib/stores/user.svelte';
   import { payment } from '$lib/stores/payment.svelte';
   import { auth } from '$lib/stores/auth.svelte';
+  import { COUNTRIES, COUNTRIES_BY_NATIONALITY } from '$lib/data/countries';
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
 
@@ -26,10 +27,15 @@
   let editLast = $state('');
   let editPhone = $state('');
   let editAddressLine1 = $state('');
+  let editAddressLine2 = $state('');
   let editAddressCity = $state('');
   let editAddressState = $state('');
   let editAddressPostal = $state('');
   let editAddressCountry = $state('');
+
+  // ── Scroll container ref (reset on screen change so detail-screen scroll
+  //    doesn't bleed into the shorter main screen on the way back) ─────────
+  let panelBodyEl = $state<HTMLDivElement | undefined>(undefined);
 
   // ── Travel edit state ─────────────────────────────────────────────────────
   let editNationality = $state('');
@@ -64,6 +70,7 @@
       editLast = d?.profile?.last_name ?? '';
       editPhone = d?.profile?.phone ?? '';
       editAddressLine1 = d?.home_address?.line1 ?? '';
+      editAddressLine2 = d?.home_address?.line2 ?? '';
       editAddressCity = d?.home_address?.city ?? '';
       editAddressState = d?.home_address?.state ?? '';
       editAddressPostal = d?.home_address?.postal_code ?? '';
@@ -83,22 +90,32 @@
     }
   }
 
-  function goTo(s: Screen) {
-    initScreen(s);
-    screen = s;
+  /** Reset the panel-body scroll to the top — called after every nav so a
+   *  deeply-scrolled detail screen doesn't render the next screen mid-page. */
+  async function resetScroll() {
+    await tick();
+    panelBodyEl?.scrollTo({ top: 0 });
   }
 
-  function goBack() {
+  async function goTo(s: Screen) {
+    initScreen(s);
+    screen = s;
+    await resetScroll();
+  }
+
+  async function goBack() {
     screen = 'main';
     showCardForm = false;
     stripeError = null;
+    await resetScroll();
   }
 
-  function handleClose() {
+  async function handleClose() {
     open = false;
     screen = 'main';
     showCardForm = false;
     stripeError = null;
+    await resetScroll();
   }
 
   /** Convert empty-string form values to null for the API. */
@@ -117,13 +134,14 @@
         },
         home_address: {
           line1: nullable(editAddressLine1),
+          line2: nullable(editAddressLine2),
           city: nullable(editAddressCity),
           state: nullable(editAddressState),
           postal_code: nullable(editAddressPostal),
           country: nullable(editAddressCountry),
         },
       });
-      goBack();
+      await goBack();
     } catch {
       // error already on userInfo.error
     }
@@ -141,7 +159,7 @@
           expiry_date: nullable(editPassportExpiry),
         },
       });
-      goBack();
+      await goBack();
     } catch {
       // error already on userInfo.error
     }
@@ -155,7 +173,7 @@
       billing_postal_code: nullable(editBillingPostal),
       billing_country: nullable(editBillingCountry),
     });
-    if (!payment.error) goBack();
+    if (!payment.error) await goBack();
   }
 
   function useHomeAddressForBilling() {
@@ -284,7 +302,7 @@
   </div>
 
   <!-- Scrollable content -->
-  <div class="panel-body">
+  <div class="panel-body" bind:this={panelBodyEl}>
     <div class="content">
 
       <!-- ── MAIN ──────────────────────────────────────────────────── -->
@@ -375,7 +393,11 @@
         <div class="group">
           <div class="field">
             <label class="field-label" for="p-line1">Street</label>
-            <input id="p-line1" class="field-input" type="text" bind:value={editAddressLine1} placeholder="123 Main St" autocomplete="street-address" />
+            <input id="p-line1" class="field-input" type="text" bind:value={editAddressLine1} placeholder="123 Main St" autocomplete="address-line1" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="p-line2">Apt, suite, etc. (optional)</label>
+            <input id="p-line2" class="field-input" type="text" bind:value={editAddressLine2} placeholder="Apt 4B" autocomplete="address-line2" />
           </div>
           <div class="field">
             <label class="field-label" for="p-city">City</label>
@@ -391,7 +413,12 @@
           </div>
           <div class="field">
             <label class="field-label" for="p-country">Country</label>
-            <input id="p-country" class="field-input" type="text" bind:value={editAddressCountry} placeholder="France" autocomplete="country-name" />
+            <select id="p-country" class="field-input" bind:value={editAddressCountry} autocomplete="country">
+              <option value="">Select…</option>
+              {#each COUNTRIES as c (c.code)}
+                <option value={c.code}>{c.name}</option>
+              {/each}
+            </select>
           </div>
         </div>
 
@@ -409,11 +436,21 @@
         <div class="group">
           <div class="field">
             <label class="field-label" for="t-nationality">Nationality</label>
-            <input id="t-nationality" class="field-input" type="text" bind:value={editNationality} placeholder="French" />
+            <select id="t-nationality" class="field-input" bind:value={editNationality}>
+              <option value="">Select…</option>
+              {#each COUNTRIES_BY_NATIONALITY as c (c.code)}
+                <option value={c.code}>{c.nationality}</option>
+              {/each}
+            </select>
           </div>
           <div class="field">
             <label class="field-label" for="t-residence">Country of residence</label>
-            <input id="t-residence" class="field-input" type="text" bind:value={editCountryOfResidence} placeholder="France" />
+            <select id="t-residence" class="field-input" bind:value={editCountryOfResidence}>
+              <option value="">Select…</option>
+              {#each COUNTRIES as c (c.code)}
+                <option value={c.code}>{c.name}</option>
+              {/each}
+            </select>
           </div>
           <div class="field">
             <label class="field-label" for="t-passport">Passport number</label>
@@ -492,7 +529,12 @@
             </div>
             <div class="field">
               <label class="field-label" for="b-country">Country</label>
-              <input id="b-country" class="field-input" type="text" bind:value={editBillingCountry} placeholder="France" autocomplete="country-name" />
+              <select id="b-country" class="field-input" bind:value={editBillingCountry} autocomplete="country">
+                <option value="">Select…</option>
+                {#each COUNTRIES as c (c.code)}
+                  <option value={c.code}>{c.name}</option>
+                {/each}
+              </select>
             </div>
           </div>
           {#if hasHomeAddress}
