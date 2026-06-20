@@ -1,8 +1,10 @@
+//! Auth0 HTTP flows: password-realm login, signup, password reset, and
+//! browser-based PKCE. Token refresh lives here too (called from keychain.rs).
+
 use anyhow::{anyhow, Context, Result};
-use oauth2::url::Url;
 use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge,
-    RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, url::Url, AuthUrl, AuthorizationCode, ClientId, CsrfToken,
+    PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -11,73 +13,33 @@ use tauri_plugin_oauth::OauthConfig;
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, instrument, warn};
 
-const KEYRING_SERVICE: &str = "com.silvie";
-const KEYRING_ACCOUNT: &str = "auth0";
+use crate::config::Auth0Config;
+
+use super::{
+    keychain::persist,
+    types::{AuthUser, TokenSet},
+};
 
 /// Fixed loopback port — must match the callback registered in Auth0 Terraform
 /// (`http://localhost:1421/callback` in `infra/terraform/auth0/config/dev.yaml`).
 const LOOPBACK_PORT: u16 = 1421;
 
-/// User-facing message shown when an HTTP request to Auth0 fails at the
-/// transport layer (DNS, TLS, connection refused, etc.). The detailed error
-/// chain is always logged via tracing — only the message returned to the
-/// frontend is generic. Avoids leaking internal infra details (corporate
-/// proxy certs, hostnames, etc.) into the UI.
+/// Generic user-facing message when Auth0 is unreachable. The detailed error
+/// is always logged — only this safe string reaches the frontend.
 const NETWORK_ERROR_USER_MSG: &str =
     "Couldn't reach the authentication service. Please check your network connection and try again.";
 
-/// Static configuration passed in from env vars in `lib.rs`.
-pub struct Auth0Config {
-    pub domain: String,
-    pub client_id: String,
-    pub audience: String,
-    pub connection: String,
-}
+// ── Public flows ─────────────────────────────────────────────────────────────
 
-impl Auth0Config {
-    fn ensure_configured(&self) -> Result<(), String> {
-        if self.domain.is_empty()
-            || self.client_id.is_empty()
-            || self.audience.is_empty()
-            || self.connection.is_empty()
-        {
-            return Err(
-                "Auth0 is not configured. Set AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_AUDIENCE and AUTH0_CONNECTION in src-tauri/.env."
-                    .to_string(),
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthUser {
-    pub sub: String,
-    pub email: String,
-    pub name: String,
-    pub picture: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredAuthCredentials {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_at: Option<i64>,
-    user: AuthUser,
-}
-
-// ── Public API ──────────────────────────────────────────────────────────────
-
-/// Resource Owner Password Grant (Password-Realm). Pure in-app login —
-/// no browser opens.
+/// Resource Owner Password Grant (Password-Realm). Pure in-app login — no
+/// browser window opens.
 #[instrument(skip(cfg, password), fields(email_len = email.len()))]
 pub async fn login_password(cfg: &Auth0Config, email: &str, password: &str) -> Result<AuthUser> {
-    cfg.ensure_configured().map_err(|e| anyhow!("{e}"))?;
+    cfg.ensure_configured()?;
     info!("starting Auth0 password-realm login");
 
-    let http_client = build_http_client()?;
-    let token = request_password_grant(&http_client, cfg, email, password).await?;
-
+    let http = build_http_client()?;
+    let token = request_password_grant(&http, cfg, email, password).await?;
     let user = fetch_userinfo(&cfg.domain, &token.access_token).await?;
     info!("userinfo fetched");
     persist(&token, &user)?;
@@ -92,12 +54,11 @@ pub async fn signup(
     password: &str,
     name: &str,
 ) -> Result<AuthUser> {
-    cfg.ensure_configured().map_err(|e| anyhow!("{e}"))?;
+    cfg.ensure_configured()?;
     info!("starting Auth0 signup");
 
-    let http_client = build_http_client()?;
+    let http = build_http_client()?;
 
-    // 1) Create the user via /dbconnections/signup
     let body = serde_json::json!({
         "client_id": cfg.client_id,
         "email": email,
@@ -108,7 +69,7 @@ pub async fn signup(
     let url = format!("https://{}/dbconnections/signup", cfg.domain);
     info!(%url, "POST signup");
 
-    let resp = http_client
+    let resp = http
         .post(&url)
         .json(&body)
         .send()
@@ -130,9 +91,8 @@ pub async fn signup(
     }
     debug!("signup response OK");
 
-    // 2) Immediately exchange credentials for tokens
     info!("signup successful, logging in");
-    let token = request_password_grant(&http_client, cfg, email, password).await?;
+    let token = request_password_grant(&http, cfg, email, password).await?;
     let user = fetch_userinfo(&cfg.domain, &token.access_token).await?;
     persist(&token, &user)?;
     Ok(user)
@@ -142,10 +102,10 @@ pub async fn signup(
 /// whether the email exists (to prevent user enumeration).
 #[instrument(skip(cfg), fields(email_len = email.len()))]
 pub async fn request_password_reset(cfg: &Auth0Config, email: &str) -> Result<()> {
-    cfg.ensure_configured().map_err(|e| anyhow!("{e}"))?;
+    cfg.ensure_configured()?;
     info!("requesting password reset email");
 
-    let http_client = build_http_client()?;
+    let http = build_http_client()?;
     let body = serde_json::json!({
         "client_id": cfg.client_id,
         "email": email,
@@ -154,7 +114,7 @@ pub async fn request_password_reset(cfg: &Auth0Config, email: &str) -> Result<()
     let url = format!("https://{}/dbconnections/change_password", cfg.domain);
     info!(%url, "POST change_password");
 
-    let resp = http_client
+    let resp = http
         .post(&url)
         .json(&body)
         .send()
@@ -172,21 +132,17 @@ pub async fn request_password_reset(cfg: &Auth0Config, email: &str) -> Result<()
 
     if !status.is_success() {
         error!(%status, body = %resp_body, "password reset failed");
-        return Err(parse_auth0_error(
-            status,
-            &resp_body,
-            "Password reset failed",
-        ));
+        return Err(parse_auth0_error(status, &resp_body, "Password reset failed"));
     }
 
     info!("password reset email requested");
     Ok(())
 }
 
-/// Browser-based flow (PKCE). Used for social logins, MFA, or any case the
+/// Browser-based PKCE flow. Used for social logins, MFA, or any case the
 /// in-app form can't handle. Opens the system browser to Auth0 Universal Login.
 ///
-/// When `connection` is `Some("google-oauth2")` (or another connection name),
+/// When `connection` is `Some("google-oauth2")` (or another connection slug),
 /// Auth0 skips the Universal Login chooser and goes straight to that provider.
 #[instrument(skip(app, cfg))]
 pub async fn login_browser(
@@ -194,7 +150,7 @@ pub async fn login_browser(
     cfg: &Auth0Config,
     connection: Option<&str>,
 ) -> Result<AuthUser> {
-    cfg.ensure_configured().map_err(|e| anyhow!("{e}"))?;
+    cfg.ensure_configured()?;
     info!("starting Auth0 browser login flow");
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
@@ -217,7 +173,7 @@ pub async fn login_browser(
     .map_err(|e| anyhow!("Failed to start OAuth loopback server on port {LOOPBACK_PORT}: {e}"))?;
     info!(port, "loopback server started");
 
-    let http_client = build_http_client()?;
+    let http = build_http_client()?;
 
     let client = BasicClient::new(ClientId::new(cfg.client_id.clone()))
         .set_auth_uri(
@@ -287,7 +243,7 @@ pub async fn login_browser(
     let token_response = client
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(pkce_verifier)
-        .request_async(&http_client)
+        .request_async(&http)
         .await
         .map_err(|e| {
             error!("token exchange failed: {e}");
@@ -314,58 +270,14 @@ pub async fn login_browser(
     Ok(user)
 }
 
-/// Returns the cached user (no validation/refresh — used to gate the UI).
-pub fn load_user() -> Option<AuthUser> {
-    let payload = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .ok()?
-        .get_password()
-        .ok()?;
-    let creds: StoredAuthCredentials = serde_json::from_str(&payload).ok()?;
-    debug!("Auth0 credentials loaded from keychain");
-    Some(creds.user)
-}
+// ── Token refresh (called from keychain.rs) ───────────────────────────────
 
-/// Returns a fresh access token, refreshing via the refresh token if it has
-/// expired or is about to expire within 60 seconds. Returns `Ok(None)` when
-/// the user is not logged in.
-#[instrument(skip(cfg))]
-pub async fn get_fresh_access_token(cfg: &Auth0Config) -> Result<Option<String>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| anyhow!("Keyring unavailable: {e}"))?;
+/// Exchange a refresh token for a fresh access token. Called by
+/// `keychain::get_fresh_access_token`; not part of the public Tauri command
+/// surface.
+pub async fn refresh_access_token(cfg: &Auth0Config, refresh_token: &str) -> Result<TokenSet> {
+    let http = build_http_client()?;
 
-    let payload = match entry.get_password() {
-        Ok(p) => p,
-        Err(_) => {
-            debug!("no Auth0 credentials stored — user not logged in");
-            return Ok(None);
-        }
-    };
-
-    let mut creds: StoredAuthCredentials =
-        serde_json::from_str(&payload).context("Failed to parse stored Auth0 credentials")?;
-
-    let now = chrono::Utc::now().timestamp();
-    let needs_refresh = creds.expires_at.map_or(true, |exp| now + 60 >= exp);
-
-    if !needs_refresh {
-        debug!(
-            expires_in_secs = creds.expires_at.map(|exp| exp - now).unwrap_or(-1),
-            "access token still valid"
-        );
-        return Ok(Some(creds.access_token));
-    }
-
-    info!("access token expiring soon, refreshing");
-    let refresh_token_str = match creds.refresh_token.as_ref() {
-        Some(rt) => rt.clone(),
-        None => {
-            warn!("no refresh token stored — clearing credentials and forcing re-login");
-            let _ = entry.delete_credential();
-            return Ok(None);
-        }
-    };
-
-    let http_client = build_http_client()?;
     let client = BasicClient::new(ClientId::new(cfg.client_id.clone()))
         .set_auth_uri(
             AuthUrl::new(format!("https://{}/authorize", cfg.domain))
@@ -376,65 +288,24 @@ pub async fn get_fresh_access_token(cfg: &Auth0Config) -> Result<Option<String>>
                 .context("Invalid Auth0 token URL")?,
         );
 
-    let token_response = match client
-        .exchange_refresh_token(&RefreshToken::new(refresh_token_str))
-        .request_async(&http_client)
+    let now = chrono::Utc::now().timestamp();
+    let token_response = client
+        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+        .request_async(&http)
         .await
-    {
-        Ok(r) => r,
-        Err(e) => {
+        .map_err(|e| {
             error!("token refresh failed: {e}");
-            let _ = entry.delete_credential();
-            return Err(anyhow!("Token refresh failed: {e}"));
-        }
-    };
+            anyhow!("Token refresh failed: {e}")
+        })?;
 
-    creds.access_token = token_response.access_token().secret().to_string();
-    creds.expires_at = token_response
-        .expires_in()
-        .map(|d| now + d.as_secs() as i64);
-    if let Some(new_rt) = token_response.refresh_token() {
-        creds.refresh_token = Some(new_rt.secret().to_string());
-    }
-
-    info!(
-        access_token_len = creds.access_token.len(),
-        expires_at = creds.expires_at,
-        "token refresh succeeded"
-    );
-
-    let updated = serde_json::to_string(&creds)?;
-    entry
-        .set_password(&updated)
-        .map_err(|e| anyhow!("Failed to update credentials after refresh: {e}"))?;
-
-    Ok(Some(creds.access_token))
+    Ok(TokenSet {
+        access_token: token_response.access_token().secret().to_string(),
+        refresh_token: token_response.refresh_token().map(|t| t.secret().to_string()),
+        expires_at: token_response.expires_in().map(|d| now + d.as_secs() as i64),
+    })
 }
 
-#[instrument]
-pub fn logout() -> Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| anyhow!("Keyring unavailable: {e}"))?;
-    match entry.delete_credential() {
-        Ok(_) => {
-            info!("Auth0 credentials removed from keychain");
-            Ok(())
-        }
-        Err(keyring::Error::NoEntry) => {
-            debug!("no Auth0 credentials to remove");
-            Ok(())
-        }
-        Err(e) => Err(anyhow!("Failed to remove credentials: {e}")),
-    }
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-struct TokenSet {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_at: Option<i64>,
-}
+// ── Private helpers ───────────────────────────────────────────────────────────
 
 fn build_http_client() -> Result<reqwest::Client> {
     reqwest::ClientBuilder::new()
@@ -443,25 +314,11 @@ fn build_http_client() -> Result<reqwest::Client> {
         .context("Failed to build HTTP client")
 }
 
-/// Walk an error's `source()` chain and join messages with " → ".
-/// reqwest's Display only shows the top-level message ("error sending request
-/// for url (…)") — the real cause (DNS / TLS / refused / timeout) is buried
-/// in the source chain.
-fn format_error_chain(e: &(dyn std::error::Error + 'static)) -> String {
-    let mut parts = vec![e.to_string()];
-    let mut src = e.source();
-    while let Some(cause) = src {
-        parts.push(cause.to_string());
-        src = cause.source();
-    }
-    parts.join(" → ")
-}
-
 /// POST /oauth/token with grant_type=password-realm — Auth0's Resource Owner
-/// Password Grant variant that targets a specific connection (the "realm").
-#[instrument(skip(http_client, cfg, password), fields(email_len = email.len()))]
+/// Password Grant variant that targets a specific DB connection (the "realm").
+#[instrument(skip(http, cfg, password), fields(email_len = email.len()))]
 async fn request_password_grant(
-    http_client: &reqwest::Client,
+    http: &reqwest::Client,
     cfg: &Auth0Config,
     email: &str,
     password: &str,
@@ -490,7 +347,7 @@ async fn request_password_grant(
         scope: "openid profile email offline_access",
     };
 
-    let resp = http_client
+    let resp = http
         .post(&url)
         .json(&body)
         .send()
@@ -521,7 +378,7 @@ async fn request_password_grant(
     }
 
     let parsed: TokenResp = serde_json::from_str(&resp_body)
-        .with_context(|| "Failed to parse Auth0 token response")?;
+        .context("Failed to parse Auth0 token response")?;
 
     let now = chrono::Utc::now().timestamp();
     let expires_at = parsed.expires_in.map(|secs| now + secs);
@@ -540,66 +397,6 @@ async fn request_password_grant(
     })
 }
 
-fn persist(token: &TokenSet, user: &AuthUser) -> Result<()> {
-    let payload = serde_json::to_string(&StoredAuthCredentials {
-        access_token: token.access_token.clone(),
-        refresh_token: token.refresh_token.clone(),
-        expires_at: token.expires_at,
-        user: user.clone(),
-    })?;
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| anyhow!("Keyring unavailable: {e}"))?
-        .set_password(&payload)
-        .map_err(|e| anyhow!("Failed to store credentials: {e}"))?;
-    info!("Auth0 credentials stored in keychain");
-    Ok(())
-}
-
-/// Best-effort Auth0 error parser. Returns a friendly message when the
-/// response body carries one; otherwise falls back to the status code.
-fn parse_auth0_error(status: reqwest::StatusCode, body: &str, fallback: &str) -> anyhow::Error {
-    #[derive(Deserialize)]
-    struct Err1 {
-        #[serde(default)]
-        error: Option<String>,
-        #[serde(default)]
-        error_description: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Err2 {
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        message: Option<String>,
-    }
-
-    if let Ok(e) = serde_json::from_str::<Err1>(body) {
-        if let Some(desc) = e.error_description {
-            if !desc.is_empty() {
-                return anyhow!("{desc}");
-            }
-        }
-        if let Some(code) = e.error {
-            if !code.is_empty() {
-                return anyhow!("{code}");
-            }
-        }
-    }
-    if let Ok(e) = serde_json::from_str::<Err2>(body) {
-        if let Some(desc) = e.description {
-            if !desc.is_empty() {
-                return anyhow!("{desc}");
-            }
-        }
-        if let Some(msg) = e.message {
-            if !msg.is_empty() {
-                return anyhow!("{msg}");
-            }
-        }
-    }
-    anyhow!("{fallback} (HTTP {status})")
-}
-
 #[instrument(skip(access_token))]
 async fn fetch_userinfo(domain: &str, access_token: &str) -> Result<AuthUser> {
     #[derive(Deserialize)]
@@ -615,7 +412,7 @@ async fn fetch_userinfo(domain: &str, access_token: &str) -> Result<AuthUser> {
     }
 
     let url = format!("https://{domain}/userinfo");
-    debug!("sending GET {url}");
+    debug!("GET {url}");
 
     let client = reqwest::Client::new();
     let response = client
@@ -657,4 +454,57 @@ async fn fetch_userinfo(domain: &str, access_token: &str) -> Result<AuthUser> {
         name,
         picture: info.picture,
     })
+}
+
+/// Walk an error's `source()` chain and join with " → ". reqwest's Display
+/// only shows the top-level message; the real cause is buried in the chain.
+fn format_error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut src = e.source();
+    while let Some(cause) = src {
+        parts.push(cause.to_string());
+        src = cause.source();
+    }
+    parts.join(" → ")
+}
+
+/// Extract a user-friendly message from an Auth0 JSON error body, falling
+/// back to the HTTP status if the body can't be parsed.
+fn parse_auth0_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    fallback: &str,
+) -> anyhow::Error {
+    #[derive(Deserialize)]
+    struct Err1 {
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        error_description: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Err2 {
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+    }
+
+    if let Ok(e) = serde_json::from_str::<Err1>(body) {
+        if let Some(desc) = e.error_description.filter(|s| !s.is_empty()) {
+            return anyhow!("{desc}");
+        }
+        if let Some(code) = e.error.filter(|s| !s.is_empty()) {
+            return anyhow!("{code}");
+        }
+    }
+    if let Ok(e) = serde_json::from_str::<Err2>(body) {
+        if let Some(desc) = e.description.filter(|s| !s.is_empty()) {
+            return anyhow!("{desc}");
+        }
+        if let Some(msg) = e.message.filter(|s| !s.is_empty()) {
+            return anyhow!("{msg}");
+        }
+    }
+    anyhow!("{fallback} (HTTP {status})")
 }

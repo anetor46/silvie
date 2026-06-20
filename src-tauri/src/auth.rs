@@ -1,13 +1,11 @@
 //! Google OAuth handshake. We only own the browser-side ceremony here — once
 //! the user grants consent and we have a code, we exchange it for tokens and
 //! return them to the frontend. Persistence (and refresh) happens on the
-//! backend via the `integrations` table; this module no longer touches the
-//! keychain.
+//! backend via the `integrations` table; this module never touches the keychain.
 
 use anyhow::{anyhow, Context, Result};
-use oauth2::url::Url;
 use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
+    basic::BasicClient, url::Url, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     PkceCodeChallenge, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
@@ -16,9 +14,9 @@ use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, instrument, warn};
 
-/// Public tokens returned to the frontend after a successful OAuth dance.
-/// The frontend forwards these to `POST /users/me/integrations` so the
-/// backend takes ownership of storage + refresh.
+/// Tokens returned to the frontend after a successful OAuth dance. The frontend
+/// forwards these to `POST /users/me/integrations` so the backend takes over
+/// storage + refresh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     pub access_token: String,
@@ -29,6 +27,12 @@ pub struct OAuthTokens {
     pub provider_account_id: String,
     pub email: String,
     pub scopes: Vec<String>,
+}
+
+/// Parsed fields from the Google `/userinfo` endpoint.
+struct GoogleUserInfo {
+    sub: String,
+    email: String,
 }
 
 #[instrument(skip(app, client_secret))]
@@ -148,9 +152,7 @@ pub async fn google_oauth_flow(
 
     let access_token = token_response.access_token().secret().to_string();
     let refresh_token = token_response.refresh_token().map(|t| t.secret().to_string());
-    let expires_in = token_response
-        .expires_in()
-        .map(|d| d.as_secs() as i64);
+    let expires_in = token_response.expires_in().map(|d| d.as_secs() as i64);
 
     info!(
         has_refresh_token = refresh_token.is_some(),
@@ -160,21 +162,21 @@ pub async fn google_oauth_flow(
     );
 
     info!("fetching userinfo");
-    let (email, provider_account_id) = fetch_userinfo(&access_token).await?;
-    info!(email_len = email.len(), "userinfo fetched");
+    let userinfo = fetch_userinfo(&access_token).await?;
+    info!(email_len = userinfo.email.len(), "userinfo fetched");
 
     Ok(OAuthTokens {
         access_token,
         refresh_token,
         expires_in,
-        provider_account_id,
-        email,
+        provider_account_id: userinfo.sub,
+        email: userinfo.email,
         scopes,
     })
 }
 
 #[instrument(skip(access_token))]
-async fn fetch_userinfo(access_token: &str) -> Result<(String, String)> {
+async fn fetch_userinfo(access_token: &str) -> Result<GoogleUserInfo> {
     #[derive(Deserialize)]
     struct UserInfo {
         /// Google's stable subject identifier.
@@ -182,7 +184,7 @@ async fn fetch_userinfo(access_token: &str) -> Result<(String, String)> {
         email: String,
     }
 
-    debug!("sending GET https://www.googleapis.com/oauth2/v2/userinfo");
+    debug!("GET https://www.googleapis.com/oauth2/v2/userinfo");
     let client = reqwest::Client::new();
     let response = client
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
@@ -204,5 +206,9 @@ async fn fetch_userinfo(access_token: &str) -> Result<(String, String)> {
 
     let info: UserInfo = serde_json::from_str(&body)
         .with_context(|| format!("Failed to parse userinfo JSON: {body}"))?;
-    Ok((info.email, info.sub))
+
+    Ok(GoogleUserInfo {
+        sub: info.sub,
+        email: info.email,
+    })
 }
