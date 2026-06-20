@@ -3,6 +3,7 @@
   import { loadStripe, type Stripe, type StripeElements } from '@stripe/stripe-js';
   import { profile } from '$lib/stores/profile.svelte';
   import { payment } from '$lib/stores/payment.svelte';
+  import { auth } from '$lib/stores/auth.svelte';
   import type { StoredProfile } from '$lib/services/profile';
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
@@ -300,6 +301,19 @@
             </span>
           </button>
         </div>
+
+        <!-- Session -->
+        <p class="section-header">Session</p>
+        <div class="group">
+          <button
+            class="row signout-row"
+            onclick={() => { handleClose(); void auth.logout(); }}
+            disabled={auth.loading}
+          >
+            <span class="row-label">Sign out</span>
+          </button>
+        </div>
+        {#if auth.error}<p class="error-msg" style="padding:6px 4px">{auth.error}</p>{/if}
 
       <!-- ── PERSONAL ───────────────────────────────────────────────── -->
       {:else if screen === 'personal'}
@@ -663,6 +677,10 @@
 
   .row:last-child { border-bottom: none; }
   .row:hover { background: var(--surface-hover); }
+
+  .signout-row .row-label { color: var(--error); }
+  .signout-row:hover { background: #fff0f0; }
+  .signout-row:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .row-label {
     font-size: 14px;

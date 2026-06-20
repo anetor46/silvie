@@ -10,6 +10,9 @@ locals {
   auth0_domain        = get_env("AUTH0_DOMAIN")
   auth0_client_id     = get_env("AUTH0_TF_CLIENT_ID")
   auth0_client_secret = get_env("AUTH0_TF_CLIENT_SECRET")
+  // Shared with src-tauri/.env — same Google OAuth client used for Calendar.
+  google_client_id     = get_env("GOOGLE_CLIENT_ID")
+  google_client_secret = get_env("GOOGLE_CLIENT_SECRET")
 }
 
 remote_state {
@@ -48,9 +51,12 @@ EOF
 }
 
 inputs = {
-  env          = local.env
-  auth0_domain = local.auth0_domain
-  params       = local.params
+  env                  = local.env
+  auth0_domain         = local.auth0_domain
+  auth0_tf_client_id   = local.auth0_client_id
+  google_client_id     = local.google_client_id
+  google_client_secret = local.google_client_secret
+  params               = local.params
 }
 
 // When switching environments each module needs to be reconfigured

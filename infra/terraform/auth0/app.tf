@@ -9,7 +9,13 @@ resource "auth0_client" "silvie_app" {
 
   callbacks           = var.params.native_app.callbacks
   allowed_logout_urls = var.params.native_app.logout_urls
-  grant_types         = ["authorization_code", "refresh_token"]
+  // password-realm: in-app email/password login (ROPG).
+  // authorization_code + refresh_token: browser fallback (social/MFA).
+  grant_types = [
+    "authorization_code",
+    "refresh_token",
+    "http://auth0.com/oauth/grant-type/password-realm",
+  ]
 
   jwt_configuration {
     alg = "RS256"

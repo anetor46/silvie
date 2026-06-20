@@ -4,7 +4,8 @@
   import Header from '$lib/components/Header.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import UserPanel from '$lib/components/UserPanel.svelte';
-  import Onboarding from '$lib/components/Onboarding.svelte';
+  import Login from '$lib/components/Login.svelte';
+  import { auth } from '$lib/stores/auth.svelte';
   import { profile } from '$lib/stores/profile.svelte';
   import { payment } from '$lib/stores/payment.svelte';
 
@@ -12,30 +13,46 @@
 
   let sidebarOpen = $state(false);
   let userPanelOpen = $state(false);
-  let showOnboarding = $state(false);
 
   onMount(async () => {
-    await Promise.all([profile.load(), payment.load()]);
-    if (!profile.data) showOnboarding = true;
+    await auth.load();
+    if (auth.user) {
+      await Promise.all([profile.load(), payment.load()]);
+    }
+  });
+
+  // Load profile/payment as soon as the user becomes available
+  // (handles the post-login transition without a full reload).
+  let lastUserSub = $state<string | null>(null);
+  $effect(() => {
+    const sub = auth.user?.sub ?? null;
+    if (sub && sub !== lastUserSub) {
+      lastUserSub = sub;
+      void Promise.all([profile.load(), payment.load()]);
+    } else if (!sub) {
+      lastUserSub = null;
+    }
   });
 </script>
 
-{#if showOnboarding}
-  <Onboarding ondone={() => (showOnboarding = false)} />
-{/if}
+{#if !auth.loaded}
+  <div class="boot-splash"></div>
+{:else if !auth.user}
+  <Login />
+{:else}
+  <Sidebar bind:open={sidebarOpen} />
+  <UserPanel bind:open={userPanelOpen} />
 
-<Sidebar bind:open={sidebarOpen} />
-<UserPanel bind:open={userPanelOpen} />
-
-<div class="frame">
-  <Header
-    onMenuClick={() => (sidebarOpen = !sidebarOpen)}
-    onUserClick={() => (userPanelOpen = !userPanelOpen)}
-  />
-  <div class="content">
-    {@render children()}
+  <div class="frame">
+    <Header
+      onMenuClick={() => (sidebarOpen = !sidebarOpen)}
+      onUserClick={() => (userPanelOpen = !userPanelOpen)}
+    />
+    <div class="content">
+      {@render children()}
+    </div>
   </div>
-</div>
+{/if}
 
 <style>
   .frame {
@@ -49,5 +66,11 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+
+  .boot-splash {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
   }
 </style>

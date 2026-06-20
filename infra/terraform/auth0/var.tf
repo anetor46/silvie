@@ -8,6 +8,22 @@ variable "auth0_domain" {
   description = "Auth0 tenant domain (e.g. silvie.eu.auth0.com)"
 }
 
+variable "auth0_tf_client_id" {
+  type        = string
+  description = "Client ID of the M2M application that Terraform uses to manage Auth0"
+}
+
+variable "google_client_id" {
+  type        = string
+  description = "Google OAuth Client ID — used by Auth0 for 'Continue with Google' login. Same client_id is reused by the app for direct Calendar API access."
+}
+
+variable "google_client_secret" {
+  type        = string
+  sensitive   = true
+  description = "Google OAuth Client Secret — corresponds to google_client_id."
+}
+
 variable "params" {
   description = "Auth0 configuration loaded from config/<env>.yaml"
   type = object({
