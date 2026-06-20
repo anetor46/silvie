@@ -1,9 +1,7 @@
-//! Conversation + message persistence.
-//!
-//! Public CRUD operates on conversations the JWT-validated user owns. The
-//! `insert_user_message` / `insert_assistant_message` / `load_history`
-//! helpers are used by the chat handler — they persist the back-and-forth as
-//! the streaming response unfolds.
+//! ORM layer for `conversations` + `messages`. The public CRUD operates on
+//! conversations the JWT-validated user owns. The `insert_user_message` /
+//! `insert_assistant_message` / `load_history` helpers are used by the chat
+//! handler — they persist the back-and-forth as the streaming response unfolds.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -12,20 +10,13 @@ use diesel::{
     SelectableHelper,
 };
 use diesel_async::RunQueryDsl;
-use poem::{
-    handler,
-    http::StatusCode,
-    web::{Data, Json, Path},
-};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 use uuid::Uuid;
 
 use crate::{
-    auth::Principal,
     db::DbPool,
     schema::{conversations, messages},
-    users,
 };
 
 /// Max length of an auto-generated title (chars). Anything longer gets
@@ -94,15 +85,11 @@ pub struct UpdateConversationRequest {
 
 // ── Public CRUD ─────────────────────────────────────────────────────────────
 
-#[instrument(skip(pool), fields(sub_len = sub.len()))]
-pub async fn list_for_user(pool: &DbPool, sub: &str) -> Result<Vec<Conversation>> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(Vec::new()),
-    };
+#[instrument(skip(pool))]
+pub async fn list_for_user(pool: &DbPool, user_id: Uuid) -> Result<Vec<Conversation>> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
     conversations::table
-        .filter(conversations::user_id.eq(user.id))
+        .filter(conversations::user_id.eq(user_id))
         .filter(conversations::deleted_at.is_null())
         .order(conversations::updated_at.desc())
         .select(Conversation::as_select())
@@ -111,38 +98,31 @@ pub async fn list_for_user(pool: &DbPool, sub: &str) -> Result<Vec<Conversation>
         .context("Failed to list conversations")
 }
 
-#[instrument(skip(pool), fields(sub_len = sub.len()))]
-pub async fn create_for_user(pool: &DbPool, sub: &str) -> Result<Option<Conversation>> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(None),
-    };
+#[instrument(skip(pool))]
+pub async fn create_for_user(pool: &DbPool, user_id: Uuid) -> Result<Conversation> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
     let row: Conversation = diesel::insert_into(conversations::table)
-        .values(NewConversation { user_id: user.id })
+        .values(NewConversation { user_id })
         .returning(Conversation::as_returning())
         .get_result(&mut conn)
         .await
         .context("Failed to insert conversation")?;
     info!(conversation_id = %row.id, "conversation created");
-    Ok(Some(row))
+    Ok(row)
 }
 
-/// Look up a conversation owned by the given user. Returns `None` if either
-/// the user or the conversation doesn't exist (or isn't owned by them).
+/// Look up a conversation owned by the given user. Returns `None` if the
+/// conversation doesn't exist (or isn't owned by them — same response either
+/// way, so we don't leak whether the id is just unknown vs. someone else's).
 pub async fn find_owned(
     pool: &DbPool,
-    sub: &str,
+    user_id: Uuid,
     conv_id: Uuid,
 ) -> Result<Option<Conversation>> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(None),
-    };
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
     conversations::table
         .filter(conversations::id.eq(conv_id))
-        .filter(conversations::user_id.eq(user.id))
+        .filter(conversations::user_id.eq(user_id))
         .filter(conversations::deleted_at.is_null())
         .select(Conversation::as_select())
         .first(&mut conn)
@@ -151,13 +131,13 @@ pub async fn find_owned(
         .context("Failed to look up conversation")
 }
 
-#[instrument(skip(pool), fields(sub_len = sub.len()))]
+#[instrument(skip(pool))]
 pub async fn fetch_with_messages(
     pool: &DbPool,
-    sub: &str,
+    user_id: Uuid,
     conv_id: Uuid,
 ) -> Result<Option<ConversationWithMessages>> {
-    let convo = match find_owned(pool, sub, conv_id).await? {
+    let convo = match find_owned(pool, user_id, conv_id).await? {
         Some(c) => c,
         None => return Ok(None),
     };
@@ -175,17 +155,13 @@ pub async fn fetch_with_messages(
     }))
 }
 
-#[instrument(skip(pool), fields(sub_len = sub.len()))]
-pub async fn soft_delete(pool: &DbPool, sub: &str, conv_id: Uuid) -> Result<bool> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(false),
-    };
+#[instrument(skip(pool))]
+pub async fn soft_delete(pool: &DbPool, user_id: Uuid, conv_id: Uuid) -> Result<bool> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
     let n: usize = diesel::update(
         conversations::table
             .filter(conversations::id.eq(conv_id))
-            .filter(conversations::user_id.eq(user.id))
+            .filter(conversations::user_id.eq(user_id))
             .filter(conversations::deleted_at.is_null()),
     )
     .set((
@@ -198,22 +174,18 @@ pub async fn soft_delete(pool: &DbPool, sub: &str, conv_id: Uuid) -> Result<bool
     Ok(n > 0)
 }
 
-#[instrument(skip(pool, title), fields(sub_len = sub.len()))]
+#[instrument(skip(pool, title))]
 pub async fn update_title(
     pool: &DbPool,
-    sub: &str,
+    user_id: Uuid,
     conv_id: Uuid,
     title: Option<String>,
 ) -> Result<Option<Conversation>> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(None),
-    };
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
     let n: usize = diesel::update(
         conversations::table
             .filter(conversations::id.eq(conv_id))
-            .filter(conversations::user_id.eq(user.id))
+            .filter(conversations::user_id.eq(user_id))
             .filter(conversations::deleted_at.is_null()),
     )
     .set((
@@ -333,81 +305,4 @@ pub async fn load_history(pool: &DbPool, conv_id: Uuid) -> Result<Vec<Message>> 
         .load(&mut conn)
         .await
         .context("Failed to load message history")
-}
-
-// ── HTTP handlers ───────────────────────────────────────────────────────────
-
-#[handler]
-pub async fn list_conversations_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-) -> poem::Result<Json<Vec<Conversation>>> {
-    list_for_user(pool, &principal.sub).await.map(Json).map_err(|e| {
-        error!("conversations list failed: {e:#}");
-        poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-    })
-}
-
-#[handler]
-pub async fn create_conversation_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-) -> poem::Result<Json<Conversation>> {
-    let convo = create_for_user(pool, &principal.sub).await.map_err(|e| {
-        error!("conversation create failed: {e:#}");
-        poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-    })?;
-    convo
-        .map(Json)
-        .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))
-}
-
-#[handler]
-pub async fn get_conversation_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-    Path(id): Path<Uuid>,
-) -> poem::Result<Json<ConversationWithMessages>> {
-    let row = fetch_with_messages(pool, &principal.sub, id)
-        .await
-        .map_err(|e| {
-            error!("conversation fetch failed: {e:#}");
-            poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-        })?;
-    row.map(Json)
-        .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))
-}
-
-#[handler]
-pub async fn update_conversation_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-    Path(id): Path<Uuid>,
-    Json(req): Json<UpdateConversationRequest>,
-) -> poem::Result<Json<Conversation>> {
-    let row = update_title(pool, &principal.sub, id, req.title)
-        .await
-        .map_err(|e| {
-            error!("conversation update failed: {e:#}");
-            poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-        })?;
-    row.map(Json)
-        .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))
-}
-
-#[handler]
-pub async fn delete_conversation_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-    Path(id): Path<Uuid>,
-) -> poem::Result<StatusCode> {
-    let removed = soft_delete(pool, &principal.sub, id).await.map_err(|e| {
-        error!("conversation delete failed: {e:#}");
-        poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-    })?;
-    Ok(if removed {
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::NOT_FOUND
-    })
 }

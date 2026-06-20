@@ -1,8 +1,5 @@
-//! Combined user-info module: profile (1:1), home address (1 of N addresses),
-//! and primary passport (1 of N travel_documents). The current UI only writes
-//! one address (type='home') and one document (type='passport', primary), so
-//! the public API surface treats them as singletons; the underlying tables
-//! are already structured to support more.
+//! ORM layer for the user-info aggregate (profile + home address + primary
+//! passport). Three Diesel-mapped tables expressed as one logical entity.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -11,26 +8,19 @@ use diesel::{
     Selectable, SelectableHelper,
 };
 use diesel_async::RunQueryDsl;
-use poem::{
-    handler,
-    http::StatusCode,
-    web::{Data, Json},
-};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 use uuid::Uuid;
 
 use crate::{
-    auth::Principal,
     db::DbPool,
     schema::{addresses, travel_documents, user_profiles},
-    users,
 };
 
 const HOME_ADDRESS_TYPE: &str = "home";
 const PRIMARY_PASSPORT_TYPE: &str = "passport";
 
-// ── Models (read-side) ───────────────────────────────────────────────────────
+// ── Models ──────────────────────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable, Serialize, Debug, Clone)]
 #[diesel(table_name = user_profiles)]
@@ -96,7 +86,8 @@ pub struct TravelDocument {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-// ── Request / response shapes ────────────────────────────────────────────────
+// ── Aggregate response + patch shapes ──────────────────────────────────────
+// Deserialize-able so HTTP handlers can use these directly.
 
 #[derive(Serialize)]
 pub struct UserInfoResponse {
@@ -141,7 +132,7 @@ pub struct PassportPatch {
 }
 
 #[derive(Deserialize, Default)]
-pub struct UpdateUserInfoRequest {
+pub struct UserInfoPatch {
     /// Each section is optional. Omitted → leave unchanged; present → upsert.
     /// Within a section, every field is sent (NULL clears the value).
     pub profile: Option<ProfilePatch>,
@@ -149,7 +140,7 @@ pub struct UpdateUserInfoRequest {
     pub primary_passport: Option<PassportPatch>,
 }
 
-// ── Insertable bridges (Diesel's Insertable needs `#[diesel(table_name)]`) ──
+// ── Insertable bridges (diesel forms) ───────────────────────────────────────
 
 #[derive(Insertable, AsChangeset, Default)]
 #[diesel(table_name = user_profiles)]
@@ -192,17 +183,12 @@ struct TravelDocumentForm<'a> {
 // ── Queries ─────────────────────────────────────────────────────────────────
 
 /// Assemble the full read-side view for a user.
-#[instrument(skip(pool), fields(sub_len = sub.len()))]
-pub async fn fetch_user_info(pool: &DbPool, sub: &str) -> Result<Option<UserInfoResponse>> {
+#[instrument(skip(pool))]
+pub async fn fetch_user_info(pool: &DbPool, user_id: Uuid) -> Result<UserInfoResponse> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
 
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(None),
-    };
-
     let profile = user_profiles::table
-        .find(user.id)
+        .find(user_id)
         .select(UserProfile::as_select())
         .first(&mut conn)
         .await
@@ -210,7 +196,7 @@ pub async fn fetch_user_info(pool: &DbPool, sub: &str) -> Result<Option<UserInfo
         .context("Failed to query user_profiles")?;
 
     let home_address = addresses::table
-        .filter(addresses::user_id.eq(user.id))
+        .filter(addresses::user_id.eq(user_id))
         .filter(addresses::type_.eq(HOME_ADDRESS_TYPE))
         .filter(addresses::deleted_at.is_null())
         .select(Address::as_select())
@@ -220,7 +206,7 @@ pub async fn fetch_user_info(pool: &DbPool, sub: &str) -> Result<Option<UserInfo
         .context("Failed to query addresses")?;
 
     let primary_passport = travel_documents::table
-        .filter(travel_documents::user_id.eq(user.id))
+        .filter(travel_documents::user_id.eq(user_id))
         .filter(travel_documents::type_.eq(PRIMARY_PASSPORT_TYPE))
         .filter(travel_documents::is_primary.eq(true))
         .filter(travel_documents::deleted_at.is_null())
@@ -230,36 +216,27 @@ pub async fn fetch_user_info(pool: &DbPool, sub: &str) -> Result<Option<UserInfo
         .optional()
         .context("Failed to query travel_documents")?;
 
-    Ok(Some(UserInfoResponse {
+    Ok(UserInfoResponse {
         profile,
         home_address,
         primary_passport,
-    }))
+    })
 }
 
-/// Apply a partial update across the three tables in a single transaction.
-/// Returns the refreshed view.
-#[instrument(skip(pool, req), fields(sub_len = sub.len()))]
+/// Apply a partial update across the three tables. Returns the refreshed view.
+#[instrument(skip(pool, req))]
 pub async fn update_user_info(
     pool: &DbPool,
-    sub: &str,
-    req: UpdateUserInfoRequest,
-) -> Result<Option<UserInfoResponse>> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(None),
-    };
-
+    user_id: Uuid,
+    req: UserInfoPatch,
+) -> Result<UserInfoResponse> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
 
     // NOTE on atomicity: the writes below are NOT wrapped in a DB transaction.
     // diesel-async 0.9's transaction API combined with rustc's current async-
-    // closure HRTB inference can't express this cleanly (see issue threads in
-    // diesel-rs/diesel#3941 and rust-lang/rust#100013). Each individual UPSERT
-    // is idempotent, so a partial failure leaves the user free to retry. If
-    // we ever need true atomicity here, the workaround is to do the writes
-    // sync inside `tokio::task::spawn_blocking` using sync diesel.
-    let user_id = user.id;
+    // closure HRTB inference can't express this cleanly. Each individual
+    // UPSERT is idempotent, so a partial failure leaves the user free to
+    // retry.
     {
         let tx_conn = &mut *conn;
         if let Some(p) = req.profile.as_ref() {
@@ -343,53 +320,15 @@ pub async fn update_user_info(
                     .filter(travel_documents::is_primary.eq(true))
                     .filter(travel_documents::deleted_at.is_null()),
             )
-            .set((
-                &form,
-                travel_documents::updated_at.eq(diesel::dsl::now),
-            ))
+            .set((&form, travel_documents::updated_at.eq(diesel::dsl::now)))
             .execute(tx_conn)
             .await
             .context("Failed to update primary passport")?;
         }
     }
 
-    // Reload the canonical view post-write.
     drop(conn);
-    let view = fetch_user_info(pool, sub).await?;
+    let view = fetch_user_info(pool, user_id).await?;
     info!("user info updated");
     Ok(view)
-}
-
-// ── HTTP handlers ───────────────────────────────────────────────────────────
-
-/// `GET /users/me/info` — returns the combined view. 404 if the user has no
-/// DB row at all (shouldn't happen in normal flows since `/users` runs first).
-#[handler]
-pub async fn get_user_info_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-) -> poem::Result<Json<UserInfoResponse>> {
-    let view = fetch_user_info(pool, &principal.sub).await.map_err(|e| {
-        error!("user_info fetch failed: {e:#}");
-        poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-    })?;
-    view.map(Json)
-        .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))
-}
-
-/// `PUT /users/me/info` — partial update. Any omitted section is left alone.
-#[handler]
-pub async fn update_user_info_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-    Json(req): Json<UpdateUserInfoRequest>,
-) -> poem::Result<Json<UserInfoResponse>> {
-    let view = update_user_info(pool, &principal.sub, req)
-        .await
-        .map_err(|e| {
-            error!("user_info update failed: {e:#}");
-            poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-        })?;
-    view.map(Json)
-        .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))
 }

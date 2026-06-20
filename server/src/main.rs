@@ -1,26 +1,29 @@
+mod api;
 mod auth;
-mod chat;
-mod conversations;
+mod config;
 mod db;
-mod integrations;
+mod error;
 mod llm;
-mod payments;
+mod repos;
 mod schema;
 mod server;
+mod services;
 mod settings;
 mod tools;
 mod types;
-mod user_info;
-mod users;
 
 use std::env;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::JwtValidator;
-use crate::integrations::IntegrationsConfig;
+use crate::config::Config;
+use crate::llm::LlmClient;
+use crate::repos::integrations::IntegrationsConfig;
+use crate::server::ServerState;
 use crate::settings::Settings;
 
 #[tokio::main]
@@ -38,45 +41,46 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let api_key = env::var("GEMINI_API_KEY")
-        .map_err(|_| anyhow!("GEMINI_API_KEY is not set. Copy server/.env.example to server/.env and fill it in."))?;
-    let database_url = env::var("DATABASE_URL")
-        .map_err(|_| anyhow!("DATABASE_URL is not set. Add it to server/.env (see .env.example)."))?;
-    let auth0_domain = env::var("AUTH0_DOMAIN")
-        .map_err(|_| anyhow!("AUTH0_DOMAIN is not set. Add it to server/.env (see .env.example)."))?;
-    let auth0_audience = env::var("AUTH0_AUDIENCE")
-        .map_err(|_| anyhow!("AUTH0_AUDIENCE is not set. Add it to server/.env (see .env.example)."))?;
+    // Single source of truth for env-derived configuration.
+    let config = Config::from_env().context("failed to load configuration")?;
+    info!(
+        google_oauth_configured = config.google_oauth.is_some(),
+        stripe_configured = config.stripe.is_some(),
+        travelport_configured = config.travelport.is_some(),
+        "configuration loaded"
+    );
 
     // Apply any pending schema migrations before opening the pool.
-    db::run_pending_migrations(&database_url)
+    db::run_pending_migrations(&config.database_url)
         .await
         .context("database migrations failed")?;
 
-    let pool = db::init_pool(&database_url)
+    let pool = db::init_pool(&config.database_url)
         .await
         .context("failed to initialise database pool")?;
 
     let jwt_validator = Arc::new(
-        JwtValidator::new(&auth0_domain, &auth0_audience)
+        JwtValidator::new(&config.auth0.domain, &config.auth0.audience)
             .await
             .context("failed to initialise JWT validator")?,
     );
 
-    // OAuth refresh credentials for server-side token refresh (currently Google).
-    // Optional — endpoints that need refresh will return a clear error if missing.
-    let integrations_config = Arc::new(IntegrationsConfig {
-        google_client_id: env::var("GOOGLE_CLIENT_ID").unwrap_or_default(),
-        google_client_secret: env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default(),
-    });
+    let integrations_config = Arc::new(IntegrationsConfig::from(&config));
 
-    server::run(
-        &api_key,
-        &settings.server.host,
-        settings.server.port,
+    let llm = Arc::new(
+        LlmClient::new(&config.gemini_api_key, &config, pool.clone())
+            .context("failed to initialise LLM client")?,
+    );
+
+    server::run(ServerState {
+        host: settings.server.host.clone(),
+        port: settings.server.port,
         pool,
+        llm,
         jwt_validator,
         integrations_config,
-    )
+        stripe_secret_key: config.stripe.as_ref().map(|s| s.secret_key.clone()),
+    })
     .await
     .context("server failed")?;
 

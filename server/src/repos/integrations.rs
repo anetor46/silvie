@@ -14,24 +14,18 @@ use diesel::{
     Selectable, SelectableHelper,
 };
 use diesel_async::RunQueryDsl;
-use poem::{
-    handler,
-    http::StatusCode,
-    web::{Data, Json, Path},
-};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::{auth::Principal, db::DbPool, schema::integrations, users};
+use crate::{db::DbPool, schema::integrations};
 
 /// Provider slug for Google Calendar — kept here so other modules don't
 /// hard-code it.
 pub const GOOGLE_CALENDAR_PROVIDER: &str = "google_calendar";
 
-/// Env-sourced refresh credentials for each provider. Today we only support
-/// Google. As more providers are added, extend this struct.
+/// Runtime credentials needed to refresh OAuth tokens for each provider.
+/// Today only Google is wired up; new providers add fields here.
 pub struct IntegrationsConfig {
     pub google_client_id: String,
     pub google_client_secret: String,
@@ -45,6 +39,22 @@ impl IntegrationsConfig {
             ));
         }
         Ok(())
+    }
+}
+
+impl From<&crate::config::Config> for IntegrationsConfig {
+    fn from(cfg: &crate::config::Config) -> Self {
+        // Empty strings = unset. `ensure_google` translates that into a
+        // clean per-request error rather than panicking at boot.
+        let (id, secret) = cfg
+            .google_oauth
+            .as_ref()
+            .map(|g| (g.client_id.clone(), g.client_secret.clone()))
+            .unwrap_or_default();
+        Self {
+            google_client_id: id,
+            google_client_secret: secret,
+        }
     }
 }
 
@@ -145,18 +155,14 @@ pub struct AccessTokenResponse {
 
 // ── DB operations ───────────────────────────────────────────────────────────
 
-#[instrument(skip(pool), fields(sub_len = sub.len()))]
+#[instrument(skip(pool))]
 pub async fn list_user_integrations(
     pool: &DbPool,
-    sub: &str,
+    user_id: Uuid,
 ) -> Result<Vec<IntegrationView>> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(Vec::new()),
-    };
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
     let rows: Vec<Integration> = integrations::table
-        .filter(integrations::user_id.eq(user.id))
+        .filter(integrations::user_id.eq(user_id))
         .select(Integration::as_select())
         .load(&mut conn)
         .await
@@ -164,22 +170,17 @@ pub async fn list_user_integrations(
     Ok(rows.into_iter().map(IntegrationView::from).collect())
 }
 
-#[instrument(skip(pool, req), fields(sub_len = sub.len(), provider = %req.provider, account_id_len = req.provider_account_id.len()))]
+#[instrument(skip(pool, req), fields(provider = %req.provider, account_id_len = req.provider_account_id.len()))]
 pub async fn upsert_integration(
     pool: &DbPool,
-    sub: &str,
+    user_id: Uuid,
     req: &UpsertIntegrationRequest,
-) -> Result<Option<IntegrationView>> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(None),
-    };
+) -> Result<IntegrationView> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
-
     let token_expiry = req.expires_in.map(|s| Utc::now() + Duration::seconds(s));
 
     let existing_id: Option<Uuid> = integrations::table
-        .filter(integrations::user_id.eq(user.id))
+        .filter(integrations::user_id.eq(user_id))
         .filter(integrations::provider.eq(&req.provider))
         .filter(integrations::provider_account_id.eq(&req.provider_account_id))
         .select(integrations::id)
@@ -213,7 +214,7 @@ pub async fn upsert_integration(
             .context("Failed to fetch updated integration")?
     } else {
         let row = NewIntegration {
-            user_id: user.id,
+            user_id,
             provider: &req.provider,
             provider_account_id: &req.provider_account_id,
             provider_account_email: req.provider_account_email.as_deref(),
@@ -232,20 +233,16 @@ pub async fn upsert_integration(
         inserted
     };
 
-    Ok(Some(row.into()))
+    Ok(row.into())
 }
 
-#[instrument(skip(pool), fields(sub_len = sub.len()))]
-pub async fn delete_integration_by_id(pool: &DbPool, sub: &str, id: Uuid) -> Result<bool> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(false),
-    };
+#[instrument(skip(pool))]
+pub async fn delete_integration_by_id(pool: &DbPool, user_id: Uuid, id: Uuid) -> Result<bool> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
     let n: usize = diesel::delete(
         integrations::table
             .filter(integrations::id.eq(id))
-            .filter(integrations::user_id.eq(user.id)),
+            .filter(integrations::user_id.eq(user_id)),
     )
     .execute(&mut conn)
     .await
@@ -277,18 +274,14 @@ async fn find_active_for_provider(
 /// the stored refresh_token if the cached access_token has expired (or is
 /// within a 60-second grace window of expiry). Updates the row on refresh.
 /// Returns `Ok(None)` if the user has no active integration for that provider.
-#[instrument(skip(pool, cfg), fields(sub_len = sub.len(), provider))]
+#[instrument(skip(pool, cfg), fields(provider))]
 pub async fn fresh_access_token(
     pool: &DbPool,
     cfg: &IntegrationsConfig,
-    sub: &str,
+    user_id: Uuid,
     provider: &str,
 ) -> Result<Option<AccessTokenResponse>> {
-    let user = match users::find_by_sub(pool, sub).await? {
-        Some(u) => u,
-        None => return Ok(None),
-    };
-    let integration = match find_active_for_provider(pool, user.id, provider).await? {
+    let integration = match find_active_for_provider(pool, user_id, provider).await? {
         Some(i) => i,
         None => return Ok(None),
     };
@@ -347,7 +340,6 @@ pub async fn fresh_access_token(
     let _: usize = diesel::update(integrations::table.filter(integrations::id.eq(integration.id)))
         .set((
             integrations::access_token.eq(&refreshed.access_token),
-            // Only overwrite refresh_token if the provider sent a new one.
             new_refresh
                 .map(|r| integrations::refresh_token.eq(Some(r.to_string())))
                 .unwrap_or_else(|| integrations::refresh_token.eq(integration.refresh_token.clone())),
@@ -414,76 +406,4 @@ async fn refresh_google_token(
         refresh_token: parsed.refresh_token,
         expires_in: parsed.expires_in,
     })
-}
-
-// ── HTTP handlers ───────────────────────────────────────────────────────────
-
-/// GET /users/me/integrations — list of (id, provider, email, status, …) for
-/// the current user. Tokens are intentionally NOT returned.
-#[handler]
-pub async fn list_integrations_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-) -> poem::Result<Json<Vec<IntegrationView>>> {
-    list_user_integrations(pool, &principal.sub).await.map(Json).map_err(|e| {
-        error!("integrations list failed: {e:#}");
-        poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-    })
-}
-
-/// POST /users/me/integrations — find-or-update an integration. Called from
-/// the client immediately after a successful OAuth handshake.
-#[handler]
-pub async fn upsert_integration_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-    Json(req): Json<UpsertIntegrationRequest>,
-) -> poem::Result<Json<IntegrationView>> {
-    let row = upsert_integration(pool, &principal.sub, &req).await.map_err(|e| {
-        error!("integration upsert failed: {e:#}");
-        poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-    })?;
-    row.map(Json)
-        .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))
-}
-
-/// DELETE /users/me/integrations/:id — disconnect one integration.
-#[handler]
-pub async fn delete_integration_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-    Path(id): Path<Uuid>,
-) -> poem::Result<StatusCode> {
-    let removed = delete_integration_by_id(pool, &principal.sub, id)
-        .await
-        .map_err(|e| {
-            error!("integration delete failed: {e:#}");
-            poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-        })?;
-    Ok(if removed {
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::NOT_FOUND
-    })
-}
-
-/// GET /users/me/integrations/:provider/access-token — returns a fresh
-/// access token for that provider (refreshing server-side via the stored
-/// refresh_token if needed). 404 if the user has no integration.
-#[handler]
-pub async fn get_access_token_handler(
-    principal: Principal,
-    Data(pool): Data<&DbPool>,
-    Data(cfg): Data<&Arc<IntegrationsConfig>>,
-    Path(provider): Path<String>,
-) -> poem::Result<Json<AccessTokenResponse>> {
-    let token = fresh_access_token(pool, cfg, &principal.sub, &provider)
-        .await
-        .map_err(|e| {
-            error!("access_token fetch failed: {e:#}");
-            poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-        })?;
-    token
-        .map(Json)
-        .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))
 }

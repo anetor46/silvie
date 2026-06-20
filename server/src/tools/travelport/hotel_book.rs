@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::db::DbPool;
-use crate::payments::{log_issuing_card_creation, mark_issuing_card_cancelled, PaymentClient};
+use crate::repos::payments::{log_issuing_card_creation, mark_issuing_card_cancelled};
+use crate::services::stripe::PaymentClient;
 use super::auth::fetch_access_token;
 use super::error::{make_api_error, TravelportError};
 

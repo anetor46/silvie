@@ -10,44 +10,59 @@ use poem::{
 use tracing::info;
 
 use crate::{
+    api::{
+        chat::chat_handler,
+        conversations::{
+            create_conversation_handler, delete_conversation_handler, get_conversation_handler,
+            list_conversations_handler, update_conversation_handler,
+        },
+        integrations::{
+            delete_integration_handler, get_access_token_handler, list_integrations_handler,
+            upsert_integration_handler,
+        },
+        payments::{
+            create_user_payment_method_handler, delete_user_payment_method_handler,
+            get_user_payment_method_handler, payment_method_handler, payment_setup_handler,
+            update_user_billing_handler,
+        },
+        user_info::{get_user_info_handler, update_user_info_handler},
+        users::{create_user_handler, users_me_handler},
+    },
     auth::JwtValidator,
-    chat::chat_handler,
-    conversations::{
-        create_conversation_handler, delete_conversation_handler, get_conversation_handler,
-        list_conversations_handler, update_conversation_handler,
-    },
     db::DbPool,
-    integrations::{
-        delete_integration_handler, get_access_token_handler, list_integrations_handler,
-        upsert_integration_handler, IntegrationsConfig,
-    },
     llm::LlmClient,
-    payments::{
-        create_user_payment_method_handler, delete_user_payment_method_handler,
-        get_user_payment_method_handler, payment_method_handler, payment_setup_handler,
-        update_user_billing_handler, PaymentClient,
-    },
-    user_info::{get_user_info_handler, update_user_info_handler},
-    users::{create_user_handler, users_me_handler},
+    repos::integrations::IntegrationsConfig,
+    services::stripe::PaymentClient,
 };
+
+/// Bundled state passed to `run` by `main`. Keeps the function signature flat.
+pub struct ServerState {
+    pub host: String,
+    pub port: u16,
+    pub pool: DbPool,
+    pub llm: Arc<LlmClient>,
+    pub jwt_validator: Arc<JwtValidator>,
+    pub integrations_config: Arc<IntegrationsConfig>,
+    pub stripe_secret_key: Option<String>,
+}
 
 #[handler]
 fn health() -> &'static str {
     "OK"
 }
 
-pub async fn run(
-    api_key: &str,
-    host: &str,
-    port: u16,
-    pool: DbPool,
-    jwt_validator: Arc<JwtValidator>,
-    integrations_config: Arc<IntegrationsConfig>,
-) -> Result<()> {
-    let llm = Arc::new(LlmClient::new(&api_key));
+pub async fn run(state: ServerState) -> Result<()> {
+    let ServerState {
+        host,
+        port,
+        pool,
+        llm,
+        jwt_validator,
+        integrations_config,
+        stripe_secret_key,
+    } = state;
 
-    let stripe_key = std::env::var("STRIPE_SECRET_KEY").ok();
-    let payment: Arc<Option<PaymentClient>> = Arc::new(stripe_key.map(PaymentClient::new));
+    let payment: Arc<Option<PaymentClient>> = Arc::new(stripe_secret_key.map(PaymentClient::new));
     if payment.is_some() {
         info!("Stripe payment client initialised");
     }
@@ -110,9 +125,6 @@ pub async fn run(
     let addr = format!("{host}:{port}");
     info!("silvie-server listening on http://{addr}");
 
-    // TODO(deploy): the server is currently loopback-only.
-    // /chat is still unauthenticated; add the Principal extractor when wiring
-    // per-user state. /users/* are already protected.
     Server::new(TcpListener::bind(&addr)).run(app).await?;
 
     Ok(())

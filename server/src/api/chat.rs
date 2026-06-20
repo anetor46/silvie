@@ -1,10 +1,11 @@
+//! `POST /chat` — SSE-streamed chat handler.
+
 use std::sync::Arc;
 
 use anyhow::Error;
 use futures::StreamExt;
 use poem::{
     handler,
-    http::StatusCode,
     web::{
         sse::{Event, SSE},
         Data, Json,
@@ -14,12 +15,15 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error};
 
 use crate::{
-    auth::Principal,
-    conversations,
+    auth::AuthUser,
     db::DbPool,
-    integrations::{self, IntegrationsConfig, GOOGLE_CALENDAR_PROVIDER},
-    llm::LlmClient,
-    payments,
+    error::{ApiError, ApiResult, ResultOptionExt},
+    llm::{ChatTurn, LlmClient, LocaleContext, StripePaymentRefs, ToolAuth},
+    repos::{
+        conversations,
+        integrations::{self, IntegrationsConfig, GOOGLE_CALENDAR_PROVIDER},
+        payments,
+    },
     types::{ChatMessage, ChatRequest, Role, SseEvent},
 };
 
@@ -41,12 +45,12 @@ fn friendly_error_message(e: &Error) -> String {
 
 #[handler]
 pub async fn chat_handler(
-    principal: Principal,
+    auth: AuthUser,
     Data(client): Data<&Arc<LlmClient>>,
     Data(pool): Data<&DbPool>,
     Data(integ_cfg): Data<&Arc<IntegrationsConfig>>,
     Json(req): Json<ChatRequest>,
-) -> poem::Result<SSE> {
+) -> ApiResult<SSE> {
     debug!(
         conversation_id = %req.conversation_id,
         content_len = req.content.len(),
@@ -54,60 +58,47 @@ pub async fn chat_handler(
     );
 
     // 1. Authorize: the user must own this conversation.
-    let convo = conversations::find_owned(pool, &principal.sub, req.conversation_id)
+    let convo = conversations::find_owned(pool, auth.user.id, req.conversation_id)
         .await
-        .map_err(|e| {
-            error!("conversation lookup failed: {e:#}");
-            poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-        })?
-        .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))?;
+        .into_required()?;
 
     // 2. Persist the user message immediately. Failure here is fatal — we
     //    don't want to call the LLM without recording the prompt.
     conversations::insert_user_message(pool, convo.id, &req.content)
         .await
-        .map_err(|e| {
-            error!("failed to persist user message: {e:#}");
-            poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-        })?;
+        .map_err(ApiError::from)?;
 
     // 3. Auto-title from the first user message (no-op once title is set).
     if let Err(e) = conversations::set_title_if_unset(pool, convo.id, &req.content).await {
         error!("failed to set conversation title: {e:#}");
-        // Non-fatal — the conversation just stays untitled.
     }
 
     // 4. Look up integration tokens + payment IDs server-side.
-    let google_access_token = match integrations::fresh_access_token(
+    let google_access_token = integrations::fresh_access_token(
         pool,
         integ_cfg,
-        &principal.sub,
+        auth.user.id,
         GOOGLE_CALENDAR_PROVIDER,
     )
     .await
-    {
-        Ok(Some(tok)) => Some(tok.access_token),
-        Ok(None) => None,
-        Err(e) => {
-            error!("failed to fetch Google access token: {e:#}");
-            None
-        }
-    };
+    .inspect_err(|e| error!("failed to fetch Google access token: {e:#}"))
+    .ok()
+    .flatten()
+    .map(|t| t.access_token);
 
-    let (stripe_customer_id, stripe_payment_method_id) =
-        match payments::fetch_payment_method(pool, &principal.sub).await {
-            Ok(Some(view)) => (
-                Some(view.payment_method.stripe_customer_id.clone()),
-                Some(view.payment_method.stripe_payment_method_id.clone()),
-            ),
-            _ => (None, None),
-        };
+    let stripe_payment = payments::fetch_payment_method(pool, auth.user.id)
+        .await
+        .ok()
+        .flatten()
+        .map(|view| StripePaymentRefs {
+            customer_id: view.payment_method.stripe_customer_id,
+            payment_method_id: view.payment_method.stripe_payment_method_id,
+        });
 
     // 5. Load full history (includes the user message we just inserted).
-    let history = conversations::load_history(pool, convo.id).await.map_err(|e| {
-        error!("failed to load history: {e:#}");
-        poem::Error::from_status(StatusCode::INTERNAL_SERVER_ERROR)
-    })?;
+    let history = conversations::load_history(pool, convo.id)
+        .await
+        .map_err(ApiError::from)?;
     let messages: Vec<ChatMessage> = history
         .into_iter()
         .filter_map(|m| {
@@ -127,8 +118,17 @@ pub async fn chat_handler(
     let client = client.clone();
     let pool_for_save = pool.clone();
     let convo_id = convo.id;
-    let timezone = req.timezone;
-    let current_datetime = req.current_datetime;
+    let turn = ChatTurn {
+        messages,
+        locale: LocaleContext {
+            timezone: req.timezone,
+            current_datetime: req.current_datetime,
+        },
+        tool_auth: ToolAuth {
+            google_access_token,
+            stripe_payment,
+        },
+    };
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseEvent>();
 
@@ -136,18 +136,7 @@ pub async fn chat_handler(
         let mut full_response = String::new();
         let mut client_disconnected = false;
 
-        match client
-            .stream_chat(
-                messages,
-                google_access_token,
-                timezone,
-                current_datetime,
-                stripe_customer_id,
-                stripe_payment_method_id,
-                pool_for_save.clone(),
-            )
-            .await
-        {
+        match client.stream(turn).await {
             Ok(mut stream) => {
                 while let Some(item) = stream.next().await {
                     match item {
