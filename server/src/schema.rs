@@ -125,6 +125,34 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    conversations (id) {
+        id -> Uuid,
+        user_id -> Uuid,
+        organization_id -> Nullable<Uuid>,
+        title -> Nullable<Text>,
+        model -> Nullable<Text>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+        deleted_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    messages (id) {
+        id -> Uuid,
+        conversation_id -> Uuid,
+        role -> Text,
+        content -> Text,
+        tool_name -> Nullable<Text>,
+        tool_call_id -> Nullable<Text>,
+        prompt_tokens -> Nullable<Int4>,
+        completion_tokens -> Nullable<Int4>,
+        latency_ms -> Nullable<Int4>,
+        created_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(user_profiles -> users (user_id));
 diesel::joinable!(addresses -> users (user_id));
 diesel::joinable!(travel_documents -> users (user_id));
@@ -133,6 +161,8 @@ diesel::joinable!(payment_methods -> addresses (billing_address_id));
 diesel::joinable!(issuing_card_log -> users (user_id));
 diesel::joinable!(issuing_card_log -> payment_methods (payment_method_id));
 diesel::joinable!(integrations -> users (user_id));
+diesel::joinable!(conversations -> users (user_id));
+diesel::joinable!(messages -> conversations (conversation_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     users,
@@ -142,4 +172,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     payment_methods,
     issuing_card_log,
     integrations,
+    conversations,
+    messages,
 );

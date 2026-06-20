@@ -29,10 +29,10 @@
     if (page.url.pathname !== '/') goto('/');
   }
 
-  function openConversation(id: string) {
-    conversations.setActive(id);
+  async function openConversation(id: string) {
     open = false;
     if (page.url.pathname !== '/') goto('/');
+    await conversations.selectConversation(id);
   }
 </script>
 
@@ -72,20 +72,21 @@
   </button>
 
   <div class="conversations">
-    {#if conversations.conversations.length === 0}
+    {#if conversations.list.length === 0}
       <p class="empty-hint">No conversations yet.</p>
     {:else}
       <p class="section-label">Recent</p>
       <ul class="conv-list">
-        {#each conversations.conversations as conv (conv.id)}
+        {#each conversations.list as conv (conv.id)}
+          {@const title = conv.title?.trim() || 'New chat'}
           <li>
             <button
               class="conv-item"
-              class:active={conversations.activeId === conv.id && page.url.pathname === '/'}
+              class:active={conversations.currentId === conv.id && page.url.pathname === '/'}
               onclick={() => openConversation(conv.id)}
-              title={conv.title}
+              title={title}
             >
-              {conv.title}
+              {title}
             </button>
           </li>
         {/each}

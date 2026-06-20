@@ -1,8 +1,6 @@
 <script lang="ts">
   import { conversations } from '$lib/stores/conversations.svelte';
-  import { streamChat, type ChatMessage } from '$lib/services/chat';
-  import { getGoogleAccessToken } from '$lib/services/connectors';
-  import { payment } from '$lib/stores/payment.svelte';
+  import { streamChat } from '$lib/services/chat';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import MessageList from '$lib/components/MessageList.svelte';
   import InputBar from '$lib/components/InputBar.svelte';
@@ -26,20 +24,25 @@
     const text = inputValue.trim();
     if (!text) return;
 
-    // If a previous generation is still running, abort it.
+    // Abort any in-flight generation.
     currentStream?.cancel();
 
-    conversations.sendUserMessage(text);
+    // Lazily create the conversation on the backend if this is a fresh chat.
+    const isFirstMessage = !conversations.currentId;
+    let conversationId: string;
+    try {
+      conversationId = await conversations.ensureConversation();
+    } catch (err) {
+      console.error('[chat] could not create conversation', err);
+      return;
+    }
+
+    conversations.appendUserMessage(text);
     inputValue = '';
     scrollToBottom();
 
-    const history: ChatMessage[] =
-      conversations.active?.messages.map((m) => ({ role: m.role, content: m.content })) ?? [];
-
     const assistantId = conversations.startAssistantMessage();
     scrollToBottom();
-
-    const googleAccessToken = await getGoogleAccessToken();
 
     const now = new Date();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -53,18 +56,13 @@
       .replace('Z', `${sign}${hh}:${mm}`);
 
     const handle = streamChat(
-      history,
+      conversationId,
+      text,
       (chunk) => {
-        conversations.appendToAssistantMessage(assistantId, chunk);
+        conversations.appendToAssistant(assistantId, chunk);
         scrollToBottom();
       },
-      {
-        googleAccessToken,
-        timezone,
-        currentDatetime,
-        stripeCustomerId: payment.method?.stripe_customer_id ?? null,
-        stripePaymentMethodId: payment.method?.stripe_payment_method_id ?? null,
-      },
+      { timezone, currentDatetime },
     );
     currentStream = handle;
 
@@ -72,13 +70,15 @@
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === 'AbortError') return;
         const message = err instanceof Error ? err.message : String(err);
-        conversations.appendToAssistantMessage(
-          assistantId,
-          `\n\n_⚠️ ${message}_`,
-        );
+        conversations.appendToAssistant(assistantId, `\n\n_⚠️ ${message}_`);
       })
       .finally(() => {
         if (currentStream === handle) currentStream = null;
+        // First-message titles are auto-generated server-side — pull the
+        // updated sidebar row so the title appears immediately.
+        if (isFirstMessage) {
+          void conversations.refreshCurrentInList();
+        }
       });
   }
 
@@ -88,10 +88,10 @@
 </script>
 
 <main class="chat-area" bind:this={messagesEl}>
-  {#if !conversations.active || conversations.active.messages.length === 0}
+  {#if conversations.currentMessages.length === 0}
     <EmptyState {suggestions} onSuggestionClick={handleSuggestion} />
   {:else}
-    <MessageList messages={conversations.active.messages} />
+    <MessageList messages={conversations.currentMessages} />
   {/if}
 </main>
 

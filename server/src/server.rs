@@ -12,6 +12,10 @@ use tracing::info;
 use crate::{
     auth::JwtValidator,
     chat::chat_handler,
+    conversations::{
+        create_conversation_handler, delete_conversation_handler, get_conversation_handler,
+        list_conversations_handler, update_conversation_handler,
+    },
     db::DbPool,
     integrations::{
         delete_integration_handler, get_access_token_handler, list_integrations_handler,
@@ -85,6 +89,16 @@ pub async fn run(
         .at(
             "/users/me/integrations/:provider/access-token",
             get(get_access_token_handler),
+        )
+        .at(
+            "/users/me/conversations",
+            get(list_conversations_handler).post(create_conversation_handler),
+        )
+        .at(
+            "/users/me/conversations/:id",
+            get(get_conversation_handler)
+                .put(update_conversation_handler)
+                .delete(delete_conversation_handler),
         )
         .with(AddData::new(llm))
         .with(AddData::new(payment))

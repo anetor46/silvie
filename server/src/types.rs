@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -14,16 +15,16 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// New chat request shape. The server is authoritative for the user's
+/// conversation history and integration tokens — the client just sends the
+/// new user turn plus the conversation id and small per-request context
+/// (timezone / datetime).
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
-    pub messages: Vec<ChatMessage>,
-    pub google_access_token: Option<String>,
+    pub conversation_id: Uuid,
+    pub content: String,
     pub timezone: Option<String>,
     pub current_datetime: Option<String>,
-    /// Stripe Customer ID stored in the user's OS keychain. Required for hotel booking.
-    pub stripe_customer_id: Option<String>,
-    /// Stripe PaymentMethod ID stored in the user's OS keychain. Required for hotel booking.
-    pub stripe_payment_method_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

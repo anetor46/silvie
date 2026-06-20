@@ -1,5 +1,6 @@
 mod auth;
 mod chat;
+mod conversations;
 mod db;
 mod integrations;
 mod llm;

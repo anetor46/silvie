@@ -1,20 +1,19 @@
 /**
  * Streaming chat client. Talks to the local Rust backend (server crate) over
  * Server-Sent Events. Uses fetch + ReadableStream (not EventSource) so we can
- * POST the message history in the body.
+ * POST the request body AND attach an Authorization header.
  *
  * Wire format (one frame per `data:` line, JSON-encoded payload):
  *   { "type": "token", "text": "<chunk>" }
  *   { "type": "done" }
  *   { "type": "error", "message": "<msg>" }
+ *
+ * Server is authoritative for conversation history + integration tokens — the
+ * client just sends the conversation id, the new user turn, and per-request
+ * locale context (timezone / current datetime).
  */
 
-export type Role = 'system' | 'user' | 'assistant';
-
-export interface ChatMessage {
-  role: Role;
-  content: string;
-}
+import { getAccessToken } from '$lib/services/auth';
 
 export interface StreamHandle {
   /** Resolves when the stream completes successfully. Rejects on error or abort. */
@@ -32,31 +31,36 @@ const BASE_URL =
   (import.meta.env.VITE_SILVIE_SERVER_URL as string | undefined) ?? 'http://localhost:8080';
 
 export interface ChatOptions {
-  googleAccessToken?: string | null;
-  timezone?: string;               // IANA name, e.g. "Europe/Paris"
-  currentDatetime?: string;        // ISO 8601 with local offset, e.g. "2026-06-19T14:32:00+02:00"
-  stripeCustomerId?: string | null;
-  stripePaymentMethodId?: string | null;
+  timezone?: string;        // IANA name, e.g. "Europe/Paris"
+  currentDatetime?: string; // ISO 8601 with local offset
 }
 
 export function streamChat(
-  messages: ChatMessage[],
+  conversationId: string,
+  content: string,
   onToken: (text: string) => void,
   opts?: ChatOptions,
 ): StreamHandle {
   const controller = new AbortController();
 
   const done = (async () => {
+    const token = await getAccessToken();
+    if (!token) {
+      throw new Error('Not signed in.');
+    }
+
     const response = await fetch(`${BASE_URL}/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({
-        messages,
-        google_access_token: opts?.googleAccessToken ?? null,
+        conversation_id: conversationId,
+        content,
         timezone: opts?.timezone ?? null,
         current_datetime: opts?.currentDatetime ?? null,
-        stripe_customer_id: opts?.stripeCustomerId ?? null,
-        stripe_payment_method_id: opts?.stripePaymentMethodId ?? null,
       }),
       signal: controller.signal,
     });
