@@ -108,6 +108,23 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    integrations (id) {
+        id -> Uuid,
+        user_id -> Uuid,
+        provider -> Text,
+        provider_account_id -> Text,
+        provider_account_email -> Nullable<Text>,
+        access_token -> Text,
+        refresh_token -> Nullable<Text>,
+        token_expiry -> Nullable<Timestamptz>,
+        scopes -> Array<Text>,
+        status -> Text,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(user_profiles -> users (user_id));
 diesel::joinable!(addresses -> users (user_id));
 diesel::joinable!(travel_documents -> users (user_id));
@@ -115,6 +132,7 @@ diesel::joinable!(payment_methods -> users (user_id));
 diesel::joinable!(payment_methods -> addresses (billing_address_id));
 diesel::joinable!(issuing_card_log -> users (user_id));
 diesel::joinable!(issuing_card_log -> payment_methods (payment_method_id));
+diesel::joinable!(integrations -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     users,
@@ -123,4 +141,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     travel_documents,
     payment_methods,
     issuing_card_log,
+    integrations,
 );

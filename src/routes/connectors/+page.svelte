@@ -23,7 +23,7 @@
             {#if provider.id === 'google-calendar'}
               <ConnectorCard
                 {provider}
-                connectedEmail={connectors.googleCalendar?.email ?? null}
+                connectedEmail={connectors.googleCalendar?.provider_account_email ?? null}
                 loading={connectors.googleCalendarLoading}
                 error={connectors.googleCalendarError}
                 onConnect={() => connectors.connectGoogleCalendar()}

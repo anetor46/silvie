@@ -13,6 +13,10 @@ use crate::{
     auth::JwtValidator,
     chat::chat_handler,
     db::DbPool,
+    integrations::{
+        delete_integration_handler, get_access_token_handler, list_integrations_handler,
+        upsert_integration_handler, IntegrationsConfig,
+    },
     llm::LlmClient,
     payments::{
         create_user_payment_method_handler, delete_user_payment_method_handler,
@@ -34,6 +38,7 @@ pub async fn run(
     port: u16,
     pool: DbPool,
     jwt_validator: Arc<JwtValidator>,
+    integrations_config: Arc<IntegrationsConfig>,
 ) -> Result<()> {
     let llm = Arc::new(LlmClient::new(&api_key));
 
@@ -69,10 +74,23 @@ pub async fn run(
             "/users/me/payment-method/billing",
             put(update_user_billing_handler),
         )
+        .at(
+            "/users/me/integrations",
+            get(list_integrations_handler).post(upsert_integration_handler),
+        )
+        .at(
+            "/users/me/integrations/:id",
+            poem::delete(delete_integration_handler),
+        )
+        .at(
+            "/users/me/integrations/:provider/access-token",
+            get(get_access_token_handler),
+        )
         .with(AddData::new(llm))
         .with(AddData::new(payment))
         .with(AddData::new(pool))
         .with(AddData::new(jwt_validator))
+        .with(AddData::new(integrations_config))
         .with(cors);
 
     let addr = format!("{host}:{port}");

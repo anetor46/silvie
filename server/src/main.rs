@@ -1,6 +1,7 @@
 mod auth;
 mod chat;
 mod db;
+mod integrations;
 mod llm;
 mod payments;
 mod schema;
@@ -18,6 +19,7 @@ use anyhow::{anyhow, Context, Result};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::JwtValidator;
+use crate::integrations::IntegrationsConfig;
 use crate::settings::Settings;
 
 #[tokio::main]
@@ -59,12 +61,20 @@ async fn main() -> Result<()> {
             .context("failed to initialise JWT validator")?,
     );
 
+    // OAuth refresh credentials for server-side token refresh (currently Google).
+    // Optional — endpoints that need refresh will return a clear error if missing.
+    let integrations_config = Arc::new(IntegrationsConfig {
+        google_client_id: env::var("GOOGLE_CLIENT_ID").unwrap_or_default(),
+        google_client_secret: env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+    });
+
     server::run(
         &api_key,
         &settings.server.host,
         settings.server.port,
         pool,
         jwt_validator,
+        integrations_config,
     )
     .await
     .context("server failed")?;

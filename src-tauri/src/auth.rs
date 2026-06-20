@@ -1,32 +1,34 @@
+//! Google OAuth handshake. We only own the browser-side ceremony here — once
+//! the user grants consent and we have a code, we exchange it for tokens and
+//! return them to the frontend. Persistence (and refresh) happens on the
+//! backend via the `integrations` table; this module no longer touches the
+//! keychain.
+
+use anyhow::{anyhow, Context, Result};
+use oauth2::url::Url;
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
-    PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
+    PkceCodeChallenge, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
-use oauth2::url::Url;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use anyhow::{anyhow, Context, Result};
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, instrument, warn};
 
-const KEYRING_SERVICE: &str = "com.silvie";
-const KEYRING_ACCOUNT: &str = "google-calendar";
-
+/// Public tokens returned to the frontend after a successful OAuth dance.
+/// The frontend forwards these to `POST /users/me/integrations` so the
+/// backend takes ownership of storage + refresh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectedAccount {
+pub struct OAuthTokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    /// Seconds until the access token expires.
+    pub expires_in: Option<i64>,
+    /// Google's stable subject identifier — used as `provider_account_id`.
+    pub provider_account_id: String,
     pub email: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredCredentials {
-    access_token: String,
-    refresh_token: Option<String>,
-    email: String,
-    /// Unix timestamp at which the access token expires.
-    /// `#[serde(default)]` keeps existing stored credentials (without this field) valid.
-    #[serde(default)]
-    expires_at: Option<i64>,
+    pub scopes: Vec<String>,
 }
 
 #[instrument(skip(app, client_secret))]
@@ -34,7 +36,7 @@ pub async fn google_oauth_flow(
     app: &AppHandle,
     client_id: &str,
     client_secret: &str,
-) -> Result<ConnectedAccount> {
+) -> Result<OAuthTokens> {
     info!("starting Google OAuth flow");
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
@@ -71,14 +73,23 @@ pub async fn google_oauth_flow(
                 .context("Invalid redirect URL")?,
         );
 
+    let calendar_scope = "https://www.googleapis.com/auth/calendar.events".to_string();
+    let scopes = vec![
+        calendar_scope.clone(),
+        "email".to_string(),
+        "profile".to_string(),
+    ];
+
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let (auth_url, _csrf_token) = client
-        .authorize_url(CsrfToken::new_random)
-        .add_scope(Scope::new(
-            "https://www.googleapis.com/auth/calendar.events".to_string(),
-        ))
-        .add_scope(Scope::new("email".to_string()))
-        .add_scope(Scope::new("profile".to_string()))
+    let mut auth = client.authorize_url(CsrfToken::new_random);
+    for s in &scopes {
+        auth = auth.add_scope(Scope::new(s.clone()));
+    }
+    // Force a refresh_token on every consent — Google only issues one on the
+    // first authorization for a given (client, user) pair otherwise.
+    let (auth_url, _csrf_token) = auth
+        .add_extra_param("access_type", "offline")
+        .add_extra_param("prompt", "consent")
         .set_pkce_challenge(pkce_challenge)
         .url();
 
@@ -137,128 +148,42 @@ pub async fn google_oauth_flow(
 
     let access_token = token_response.access_token().secret().to_string();
     let refresh_token = token_response.refresh_token().map(|t| t.secret().to_string());
-    let expires_at = token_response
+    let expires_in = token_response
         .expires_in()
-        .map(|d| chrono::Utc::now().timestamp() + d.as_secs() as i64);
+        .map(|d| d.as_secs() as i64);
 
     info!(
         has_refresh_token = refresh_token.is_some(),
         access_token_len = access_token.len(),
-        expires_at,
+        expires_in,
         "token exchange succeeded"
     );
 
     info!("fetching userinfo");
-    let email = fetch_email(&access_token).await?;
-    info!("userinfo fetched, email={email}");
+    let (email, provider_account_id) = fetch_userinfo(&access_token).await?;
+    info!(email_len = email.len(), "userinfo fetched");
 
-    info!("storing credentials in keychain");
-    let payload = serde_json::to_string(&StoredCredentials {
+    Ok(OAuthTokens {
         access_token,
         refresh_token,
-        email: email.clone(),
-        expires_at,
-    })?;
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| anyhow!("Keyring unavailable: {e}"))?
-        .set_password(&payload)
-        .map_err(|e| anyhow!("Failed to store credentials: {e}"))?;
-
-    info!("OAuth flow complete");
-    Ok(ConnectedAccount { email })
-}
-
-/// Returns a fresh access token, refreshing via the refresh token if it has
-/// expired or is about to expire within 60 seconds. Returns `Ok(None)` when
-/// no credentials are stored (user hasn't connected Google Calendar).
-#[instrument(skip(client_id, client_secret))]
-pub async fn get_fresh_access_token(client_id: &str, client_secret: &str) -> Result<Option<String>> {
-    let payload = match keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| anyhow!("Keyring unavailable: {e}"))?
-        .get_password()
-    {
-        Ok(p) => p,
-        Err(_) => {
-            debug!("no stored credentials found — Google Calendar not connected");
-            return Ok(None);
-        }
-    };
-
-    let mut creds: StoredCredentials = serde_json::from_str(&payload)
-        .context("Failed to parse stored credentials")?;
-
-    let now = chrono::Utc::now().timestamp();
-    // Default to refreshing when expires_at is unknown (credentials stored before
-    // expiry tracking was added) — safer than returning a potentially stale token.
-    let needs_refresh = creds.expires_at.map_or(true, |exp| now + 60 >= exp);
-
-    if needs_refresh {
-        info!("access token expiring soon, refreshing");
-        let refresh_token_str = creds.refresh_token.as_ref().ok_or_else(|| {
-            anyhow!("No refresh token stored — please reconnect Google Calendar")
-        })?;
-
-        let http_client = reqwest::ClientBuilder::new()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .context("Failed to build HTTP client for token refresh")?;
-
-        let client = BasicClient::new(ClientId::new(client_id.to_string()))
-            .set_client_secret(ClientSecret::new(client_secret.to_string()))
-            .set_auth_uri(
-                AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
-                    .context("Invalid auth URL")?,
-            )
-            .set_token_uri(
-                TokenUrl::new("https://oauth2.googleapis.com/token".to_string())
-                    .context("Invalid token URL")?,
-            );
-
-        let token_response = client
-            .exchange_refresh_token(&RefreshToken::new(refresh_token_str.clone()))
-            .request_async(&http_client)
-            .await
-            .map_err(|e| {
-                error!("token refresh failed: {e}");
-                anyhow!("Token refresh failed: {e}")
-            })?;
-
-        creds.access_token = token_response.access_token().secret().to_string();
-        creds.expires_at = token_response
-            .expires_in()
-            .map(|d| now + d.as_secs() as i64);
-        if let Some(new_rt) = token_response.refresh_token() {
-            creds.refresh_token = Some(new_rt.secret().to_string());
-        }
-
-        let updated = serde_json::to_string(&creds)?;
-        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-            .map_err(|e| anyhow!("Keyring unavailable: {e}"))?
-            .set_password(&updated)
-            .map_err(|e| anyhow!("Failed to update credentials after refresh: {e}"))?;
-
-        info!("token refresh succeeded");
-    } else {
-        debug!(
-            expires_in_secs = creds.expires_at.map(|exp| exp - now).unwrap_or(-1),
-            "access token still valid"
-        );
-    }
-
-    Ok(Some(creds.access_token))
+        expires_in,
+        provider_account_id,
+        email,
+        scopes,
+    })
 }
 
 #[instrument(skip(access_token))]
-async fn fetch_email(access_token: &str) -> Result<String> {
+async fn fetch_userinfo(access_token: &str) -> Result<(String, String)> {
     #[derive(Deserialize)]
     struct UserInfo {
+        /// Google's stable subject identifier.
+        sub: String,
         email: String,
     }
 
-    debug!("building userinfo HTTP client");
-    let client = reqwest::Client::new();
-
     debug!("sending GET https://www.googleapis.com/oauth2/v2/userinfo");
+    let client = reqwest::Client::new();
     let response = client
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
         .bearer_auth(access_token)
@@ -267,35 +192,17 @@ async fn fetch_email(access_token: &str) -> Result<String> {
         .context("Failed to send userinfo request")?;
 
     let status = response.status();
-    debug!("userinfo response status: {status}");
-    let body = response.text().await.context("Failed to read userinfo response body")?;
+    let body = response
+        .text()
+        .await
+        .context("Failed to read userinfo response body")?;
 
-    if status.is_success() {
-        debug!("userinfo body (success): {body}");
-    } else {
+    if !status.is_success() {
         error!("userinfo body (error {status}): {body}");
         return Err(anyhow!("userinfo returned HTTP {status}: {body}"));
     }
 
     let info: UserInfo = serde_json::from_str(&body)
         .with_context(|| format!("Failed to parse userinfo JSON: {body}"))?;
-
-    Ok(info.email)
-}
-
-pub fn load_google_account() -> Option<ConnectedAccount> {
-    let payload = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .ok()?
-        .get_password()
-        .ok()?;
-    let creds: StoredCredentials = serde_json::from_str(&payload).ok()?;
-    Some(ConnectedAccount { email: creds.email })
-}
-
-pub fn remove_google_account() -> Result<()> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| anyhow!("Keyring unavailable: {e}"))?
-        .delete_credential()
-        .map_err(|e| anyhow!("Failed to remove credentials: {e}"))?;
-    Ok(())
+    Ok((info.email, info.sub))
 }
