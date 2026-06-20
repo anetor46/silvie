@@ -18,6 +18,7 @@ build
 .data
 terraform.tfstate.backup
 terraform.tfstate
+docker-compose.override.yml
 
 # Rust workspace target dir (shared between src-tauri and server)
 /target

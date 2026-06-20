@@ -27,6 +27,9 @@ services:
       start_period: 5s
     volumes:
       - "./infra/.shared:/shared"
+    depends_on:
+      postgres:
+        condition: service_healthy
   postgres:
     container_name: postgres
     image: postgres:18-alpine
@@ -42,26 +45,25 @@ services:
       timeout: 1s
       retries: 5
     volumes:
-      - "./db/sql:/docker-entrypoint-initdb.d/"
-      - "./db/.data:/var/lib/postgresql"
-  aws:
-    container_name: aws
-    image: localstack/localstack:4
-    ports:
-      - "127.0.0.1:4566:4566"            # LocalStack Gateway
-      - "127.0.0.1:4510-4559:4510-4559"  # external services port range
-    environment:
-      DEBUG: 1
-      DEFAULT_REGION: us-east-2
-      SERVICES: iam,sts,s3,kms,cognito
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock"
-      - "./infra/localstack/:/etc/localstack/init/"
-      - "./infra/.shared:/shared"
-    healthcheck:
-      test:  >-
-        curl -sf localhost:4566/_localstack/init/ready | grep -q '"completed": true,'
-      interval: 10s
-      timeout: 2s
-      retries: 5
-      start_period: 5s
+      - ".data:/var/lib/postgresql"
+#  aws:
+#    container_name: aws
+#    image: localstack/localstack:4
+#    ports:
+#      - "127.0.0.1:4566:4566"            # LocalStack Gateway
+#      - "127.0.0.1:4510-4559:4510-4559"  # external services port range
+#    environment:
+#      DEBUG: 1
+#      DEFAULT_REGION: us-east-2
+#      SERVICES: iam,sts,s3,kms,cognito
+#    volumes:
+#      - "/var/run/docker.sock:/var/run/docker.sock"
+#      - "./infra/localstack/:/etc/localstack/init/"
+#      - "./infra/.shared:/shared"
+#    healthcheck:
+#      test:  >-
+#        curl -sf localhost:4566/_localstack/init/ready | grep -q '"completed": true,'
+#      interval: 10s
+#      timeout: 2s
+#      retries: 5
+#      start_period: 5s

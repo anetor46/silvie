@@ -1,0 +1,10 @@
+# Diesel CLI config. We commit `src/schema.rs` to the repo so the build
+# doesn't depend on having diesel_cli installed. To regenerate after editing
+# migrations:
+#   diesel print-schema > server/src/schema.rs
+[print_schema]
+file = "src/schema.rs"
+custom_type_derives = ["diesel::query_builder::QueryId"]
+
+[migrations_directory]
+dir = "migrations"

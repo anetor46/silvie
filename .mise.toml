@@ -6,7 +6,7 @@ pnpm = "11.0.3"
 [env]
 _.file = ".env"
 
-[tasks.docker-server]
+[tasks.run-server]
 description = "Run server locally"
 run = "docker compose up --build"
 
