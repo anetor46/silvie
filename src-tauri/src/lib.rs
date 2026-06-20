@@ -1,12 +1,10 @@
 mod auth;
 mod auth0;
 mod payment;
-mod profile;
 
 use auth::ConnectedAccount;
 use auth0::{Auth0Config, AuthUser};
 use payment::StoredPaymentMethod;
-use profile::StoredProfile;
 use tauri::State;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -64,16 +62,6 @@ fn get_payment_method() -> Option<StoredPaymentMethod> {
 #[tauri::command]
 fn remove_payment_method() -> Result<(), String> {
     payment::remove_payment_method().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn store_profile(data: StoredProfile) -> Result<(), String> {
-    profile::store_profile(&data).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn get_profile() -> Option<StoredProfile> {
-    profile::load_profile()
 }
 
 #[tauri::command]
@@ -176,8 +164,6 @@ pub fn run() {
             store_payment_method,
             get_payment_method,
             remove_payment_method,
-            store_profile,
-            get_profile,
             auth0_login,
             auth0_signup,
             auth0_request_password_reset,

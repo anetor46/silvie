@@ -15,6 +15,7 @@ use crate::{
     db::DbPool,
     llm::LlmClient,
     payments::{payment_method_handler, payment_setup_handler, PaymentClient},
+    user_info::{get_user_info_handler, update_user_info_handler},
     users::{create_user_handler, users_me_handler},
 };
 
@@ -43,7 +44,7 @@ pub async fn run(
         .allow_origin("http://localhost:1420") // Tauri dev URL
         .allow_origin("tauri://localhost") // macOS / Linux prod webview
         .allow_origin("https://tauri.localhost") // Windows prod webview
-        .allow_methods(["GET", "POST", "OPTIONS"])
+        .allow_methods(["GET", "POST", "PUT", "DELETE", "OPTIONS"])
         .allow_headers(["content-type", "authorization"]);
 
     let app = Route::new()
@@ -53,6 +54,7 @@ pub async fn run(
         .at("/payment/method", post(payment_method_handler))
         .at("/users", post(create_user_handler))
         .at("/users/me", get(users_me_handler))
+        .at("/users/me/info", get(get_user_info_handler).put(update_user_info_handler))
         .with(AddData::new(llm))
         .with(AddData::new(payment))
         .with(AddData::new(pool))

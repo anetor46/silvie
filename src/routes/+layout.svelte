@@ -7,7 +7,7 @@
   import Login from '$lib/components/Login.svelte';
   import { auth } from '$lib/stores/auth.svelte';
   import { user } from '$lib/stores/user.svelte';
-  import { profile } from '$lib/stores/profile.svelte';
+  import { userInfo } from '$lib/stores/user-info.svelte';
   import { payment } from '$lib/stores/payment.svelte';
 
   let { children } = $props();
@@ -31,7 +31,7 @@
         auth.error = e instanceof Error ? e.message : String(e);
         return;
       }
-      await Promise.all([profile.load(), payment.load()]);
+      await Promise.all([userInfo.load(), payment.load()]);
     }
   });
 
@@ -42,9 +42,10 @@
     const sub = auth.user?.sub ?? null;
     if (sub && sub !== lastUserSub && user.record) {
       lastUserSub = sub;
-      void Promise.all([profile.load(), payment.load()]);
+      void Promise.all([userInfo.load(), payment.load()]);
     } else if (!sub) {
       lastUserSub = null;
+      userInfo.reset();
     }
   });
 </script>

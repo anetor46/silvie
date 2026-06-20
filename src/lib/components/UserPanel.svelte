@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { loadStripe, type Stripe, type StripeElements } from '@stripe/stripe-js';
-  import { profile } from '$lib/stores/profile.svelte';
+  import { userInfo } from '$lib/stores/user-info.svelte';
+  import { user } from '$lib/stores/user.svelte';
   import { payment } from '$lib/stores/payment.svelte';
   import { auth } from '$lib/stores/auth.svelte';
-  import type { StoredProfile } from '$lib/services/profile';
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
 
@@ -24,7 +24,6 @@
   // ── Personal edit state ───────────────────────────────────────────────────
   let editFirst = $state('');
   let editLast = $state('');
-  let editEmail = $state('');
   let editPhone = $state('');
   let editAddressLine1 = $state('');
   let editAddressCity = $state('');
@@ -59,23 +58,21 @@
 
   // ── Navigation ────────────────────────────────────────────────────────────
   function initScreen(s: Screen) {
-    const d = profile.data;
-    if (!d) return;
+    const d = userInfo.data;
     if (s === 'personal') {
-      editFirst = d.first_name;
-      editLast = d.last_name;
-      editEmail = d.email;
-      editPhone = d.phone ?? '';
-      editAddressLine1 = d.address_line1 ?? '';
-      editAddressCity = d.address_city ?? '';
-      editAddressState = d.address_state ?? '';
-      editAddressPostal = d.address_postal_code ?? '';
-      editAddressCountry = d.address_country ?? '';
+      editFirst = d?.profile?.first_name ?? '';
+      editLast = d?.profile?.last_name ?? '';
+      editPhone = d?.profile?.phone ?? '';
+      editAddressLine1 = d?.home_address?.line1 ?? '';
+      editAddressCity = d?.home_address?.city ?? '';
+      editAddressState = d?.home_address?.state ?? '';
+      editAddressPostal = d?.home_address?.postal_code ?? '';
+      editAddressCountry = d?.home_address?.country ?? '';
     } else if (s === 'travel') {
-      editNationality = d.nationality ?? '';
-      editPassportNumber = d.passport_number ?? '';
-      editPassportExpiry = d.passport_expiry ?? '';
-      editCountryOfResidence = d.country_of_residence ?? '';
+      editNationality = d?.profile?.nationality ?? '';
+      editCountryOfResidence = d?.profile?.country_of_residence ?? '';
+      editPassportNumber = d?.primary_passport?.document_number ?? '';
+      editPassportExpiry = d?.primary_passport?.expiry_date ?? '';
     } else if (s === 'payment') {
       const pm = payment.method;
       editBillingLine1 = pm?.billing_line1 ?? '';
@@ -104,56 +101,71 @@
     stripeError = null;
   }
 
+  /** Convert empty-string form values to null for the API. */
+  function nullable(s: string): string | null {
+    return s.trim() || null;
+  }
+
   // ── Save helpers ──────────────────────────────────────────────────────────
   async function savePersonal() {
-    if (!editFirst.trim() || !editLast.trim() || !editEmail.trim()) return;
-    if (!profile.data) return;
-    await profile.save({
-      ...profile.data,
-      first_name: editFirst.trim(),
-      last_name: editLast.trim(),
-      email: editEmail.trim(),
-      phone: editPhone.trim() || null,
-      address_line1: editAddressLine1.trim() || null,
-      address_city: editAddressCity.trim() || null,
-      address_state: editAddressState.trim() || null,
-      address_postal_code: editAddressPostal.trim() || null,
-      address_country: editAddressCountry.trim() || null,
-    } satisfies StoredProfile);
-    if (!profile.error) goBack();
+    try {
+      await userInfo.save({
+        profile: {
+          first_name: nullable(editFirst),
+          last_name: nullable(editLast),
+          phone: nullable(editPhone),
+        },
+        home_address: {
+          line1: nullable(editAddressLine1),
+          city: nullable(editAddressCity),
+          state: nullable(editAddressState),
+          postal_code: nullable(editAddressPostal),
+          country: nullable(editAddressCountry),
+        },
+      });
+      goBack();
+    } catch {
+      // error already on userInfo.error
+    }
   }
 
   async function saveTravel() {
-    if (!profile.data) return;
-    await profile.save({
-      ...profile.data,
-      nationality: editNationality.trim() || null,
-      passport_number: editPassportNumber.trim() || null,
-      passport_expiry: editPassportExpiry.trim() || null,
-      country_of_residence: editCountryOfResidence.trim() || null,
-    } satisfies StoredProfile);
-    if (!profile.error) goBack();
+    try {
+      await userInfo.save({
+        profile: {
+          nationality: nullable(editNationality),
+          country_of_residence: nullable(editCountryOfResidence),
+        },
+        primary_passport: {
+          document_number: nullable(editPassportNumber),
+          expiry_date: nullable(editPassportExpiry),
+        },
+      });
+      goBack();
+    } catch {
+      // error already on userInfo.error
+    }
   }
 
   async function saveBilling() {
     await payment.updateBilling({
-      billing_line1: editBillingLine1.trim() || null,
-      billing_city: editBillingCity.trim() || null,
-      billing_state: editBillingState.trim() || null,
-      billing_postal_code: editBillingPostal.trim() || null,
-      billing_country: editBillingCountry.trim() || null,
+      billing_line1: nullable(editBillingLine1),
+      billing_city: nullable(editBillingCity),
+      billing_state: nullable(editBillingState),
+      billing_postal_code: nullable(editBillingPostal),
+      billing_country: nullable(editBillingCountry),
     });
     if (!payment.error) goBack();
   }
 
   function useHomeAddressForBilling() {
-    const d = profile.data;
-    if (!d) return;
-    editBillingLine1 = d.address_line1 ?? '';
-    editBillingCity = d.address_city ?? '';
-    editBillingState = d.address_state ?? '';
-    editBillingPostal = d.address_postal_code ?? '';
-    editBillingCountry = d.address_country ?? '';
+    const a = userInfo.data?.home_address;
+    if (!a) return;
+    editBillingLine1 = a.line1 ?? '';
+    editBillingCity = a.city ?? '';
+    editBillingState = a.state ?? '';
+    editBillingPostal = a.postal_code ?? '';
+    editBillingCountry = a.country ?? '';
   }
 
   // ── Card form ─────────────────────────────────────────────────────────────
@@ -195,15 +207,26 @@
   }
 
   // ── Display helpers ───────────────────────────────────────────────────────
-  const initials = $derived(
-    profile.data
-      ? `${profile.data.first_name.charAt(0)}${profile.data.last_name.charAt(0)}`.toUpperCase()
-      : '?',
-  );
+  /** Display name: prefer profile.first/last; fall back to the signup name on
+   *  the user record; finally '—'. */
+  const displayName = $derived.by(() => {
+    const p = userInfo.data?.profile;
+    if (p?.first_name && p?.last_name) return `${p.first_name} ${p.last_name}`;
+    if (p?.first_name) return p.first_name;
+    return user.record?.name || '—';
+  });
 
-  const fullName = $derived(
-    profile.data ? `${profile.data.first_name} ${profile.data.last_name}` : '—',
-  );
+  const initials = $derived.by(() => {
+    const p = userInfo.data?.profile;
+    if (p?.first_name && p?.last_name) {
+      return `${p.first_name.charAt(0)}${p.last_name.charAt(0)}`.toUpperCase();
+    }
+    const name = user.record?.name ?? '';
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return `${parts[0].charAt(0)}${parts[1].charAt(0)}`.toUpperCase();
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return '?';
+  });
 
   function val(v: string | null | undefined, fallback = '—'): string {
     return v?.trim() || fallback;
@@ -224,7 +247,7 @@
   );
 
   const hasHomeAddress = $derived(
-    !!(profile.data?.address_city || profile.data?.address_line1),
+    !!(userInfo.data?.home_address?.city || userInfo.data?.home_address?.line1),
   );
 </script>
 
@@ -270,8 +293,8 @@
         <button class="profile-card" onclick={() => goTo('personal')}>
           <div class="avatar">{initials}</div>
           <div class="profile-text">
-            <span class="profile-name">{fullName}</span>
-            <span class="profile-email">{val(profile.data?.email)}</span>
+            <span class="profile-name">{displayName}</span>
+            <span class="profile-email">{val(user.record?.email)}</span>
           </div>
           <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="9 18 15 12 9 6" />
@@ -284,7 +307,7 @@
           <button class="row" onclick={() => goTo('travel')}>
             <span class="row-label">Passport & Documents</span>
             <span class="row-right">
-              <span class="row-value">{val(profile.data?.passport_number, 'Not set')}</span>
+              <span class="row-value">{val(userInfo.data?.primary_passport?.document_number, 'Not set')}</span>
               <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
             </span>
           </button>
@@ -333,7 +356,14 @@
         <div class="group">
           <div class="field">
             <label class="field-label" for="p-email">Email</label>
-            <input id="p-email" class="field-input" type="email" bind:value={editEmail} placeholder="jane@company.com" autocomplete="email" />
+            <input
+              id="p-email"
+              class="field-input field-input-readonly"
+              type="email"
+              value={user.record?.email ?? ''}
+              readonly
+              aria-readonly="true"
+            />
           </div>
           <div class="field">
             <label class="field-label" for="p-phone">Phone</label>
@@ -365,13 +395,13 @@
           </div>
         </div>
 
-        {#if profile.error}<p class="error-msg">{profile.error}</p>{/if}
+        {#if userInfo.error}<p class="error-msg">{userInfo.error}</p>{/if}
         <button
           class="primary-btn"
           onclick={savePersonal}
-          disabled={profile.loading || !editFirst.trim() || !editLast.trim() || !editEmail.trim()}
+          disabled={userInfo.loading || !editFirst.trim() || !editLast.trim()}
         >
-          {profile.loading ? 'Saving…' : 'Save'}
+          {userInfo.loading ? 'Saving…' : 'Save'}
         </button>
 
       <!-- ── TRAVEL ─────────────────────────────────────────────────── -->
@@ -395,9 +425,9 @@
           </div>
         </div>
 
-        {#if profile.error}<p class="error-msg">{profile.error}</p>{/if}
-        <button class="primary-btn" onclick={saveTravel} disabled={profile.loading}>
-          {profile.loading ? 'Saving…' : 'Save'}
+        {#if userInfo.error}<p class="error-msg">{userInfo.error}</p>{/if}
+        <button class="primary-btn" onclick={saveTravel} disabled={userInfo.loading}>
+          {userInfo.loading ? 'Saving…' : 'Save'}
         </button>
 
       <!-- ── PAYMENT ────────────────────────────────────────────────── -->
@@ -766,6 +796,11 @@
   }
 
   .field-input::placeholder { color: var(--text-dim); }
+
+  .field-input-readonly {
+    color: var(--text-muted);
+    cursor: not-allowed;
+  }
 
   /* ── Stripe element ─────────────────────────────────────────────── */
   .stripe-element {

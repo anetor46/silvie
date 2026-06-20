@@ -8,6 +8,7 @@ mod server;
 mod settings;
 mod tools;
 mod types;
+mod user_info;
 mod users;
 
 use std::env;

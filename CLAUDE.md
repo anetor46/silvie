@@ -114,6 +114,21 @@ See `src-tauri/src/auth.rs` for a reference implementation following all these r
 
 - NEVER apply the terraform code.
 
+## Data encryption policy
+
+- **No client-side / application-level encryption (no KMS envelope encryption).**
+  Earlier drafts of the schema marked sensitive fields (passport numbers, OAuth
+  tokens) as KMS-encrypted via a per-user DEK. That was dropped to reduce
+  complexity. We rely on:
+  - **Postgres encryption-at-rest** in production (RDS / Cloud SQL / Aurora —
+    enabled by default on managed offerings).
+  - **TLS in transit** between client ↔ server ↔ database.
+  - **OS keychain** for any secrets the desktop client must hold (Auth0
+    refresh tokens, Google OAuth tokens).
+- Revisit this only if compliance requirements appear (e.g., a customer
+  contractually requires application-level encryption) or we add a new
+  category of secret materially more sensitive than what's already stored.
+
 ## Conventions
 
 - SvelteKit static adapter — no server-side rendering; the build output is a static bundle consumed by Tauri.
