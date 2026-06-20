@@ -73,13 +73,36 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    payment_methods (id) {
+        id -> Uuid,
+        user_id -> Uuid,
+        organization_id -> Nullable<Uuid>,
+        stripe_customer_id -> Text,
+        stripe_payment_method_id -> Text,
+        last4 -> Nullable<Text>,
+        brand -> Nullable<Text>,
+        exp_month -> Nullable<Int2>,
+        exp_year -> Nullable<Int2>,
+        label -> Nullable<Text>,
+        is_default -> Bool,
+        billing_address_id -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+        deleted_at -> Nullable<Timestamptz>,
+    }
+}
+
 diesel::joinable!(user_profiles -> users (user_id));
 diesel::joinable!(addresses -> users (user_id));
 diesel::joinable!(travel_documents -> users (user_id));
+diesel::joinable!(payment_methods -> users (user_id));
+diesel::joinable!(payment_methods -> addresses (billing_address_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     users,
     user_profiles,
     addresses,
     travel_documents,
+    payment_methods,
 );

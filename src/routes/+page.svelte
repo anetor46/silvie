@@ -62,8 +62,8 @@
         googleAccessToken,
         timezone,
         currentDatetime,
-        stripeCustomerId: payment.method?.customer_id ?? null,
-        stripePaymentMethodId: payment.method?.payment_method_id ?? null,
+        stripeCustomerId: payment.method?.stripe_customer_id ?? null,
+        stripePaymentMethodId: payment.method?.stripe_payment_method_id ?? null,
       },
     );
     currentStream = handle;

@@ -4,6 +4,7 @@
   import { userInfo } from '$lib/stores/user-info.svelte';
   import { user } from '$lib/stores/user.svelte';
   import { payment } from '$lib/stores/payment.svelte';
+  import { createSetupIntent } from '$lib/services/payment';
   import { auth } from '$lib/stores/auth.svelte';
   import { COUNTRIES, COUNTRIES_BY_NATIONALITY } from '$lib/data/countries';
 
@@ -45,6 +46,7 @@
 
   // ── Billing address edit state ────────────────────────────────────────────
   let editBillingLine1 = $state('');
+  let editBillingLine2 = $state('');
   let editBillingCity = $state('');
   let editBillingState = $state('');
   let editBillingPostal = $state('');
@@ -81,12 +83,13 @@
       editPassportNumber = d?.primary_passport?.document_number ?? '';
       editPassportExpiry = d?.primary_passport?.expiry_date ?? '';
     } else if (s === 'payment') {
-      const pm = payment.method;
-      editBillingLine1 = pm?.billing_line1 ?? '';
-      editBillingCity = pm?.billing_city ?? '';
-      editBillingState = pm?.billing_state ?? '';
-      editBillingPostal = pm?.billing_postal_code ?? '';
-      editBillingCountry = pm?.billing_country ?? '';
+      const b = payment.billing;
+      editBillingLine1 = b?.line1 ?? '';
+      editBillingLine2 = b?.line2 ?? '';
+      editBillingCity = b?.city ?? '';
+      editBillingState = b?.state ?? '';
+      editBillingPostal = b?.postal_code ?? '';
+      editBillingCountry = b?.country ?? '';
     }
   }
 
@@ -167,11 +170,12 @@
 
   async function saveBilling() {
     await payment.updateBilling({
-      billing_line1: nullable(editBillingLine1),
-      billing_city: nullable(editBillingCity),
-      billing_state: nullable(editBillingState),
-      billing_postal_code: nullable(editBillingPostal),
-      billing_country: nullable(editBillingCountry),
+      line1: nullable(editBillingLine1),
+      line2: nullable(editBillingLine2),
+      city: nullable(editBillingCity),
+      state: nullable(editBillingState),
+      postal_code: nullable(editBillingPostal),
+      country: nullable(editBillingCountry),
     });
     if (!payment.error) await goBack();
   }
@@ -180,6 +184,7 @@
     const a = userInfo.data?.home_address;
     if (!a) return;
     editBillingLine1 = a.line1 ?? '';
+    editBillingLine2 = a.line2 ?? '';
     editBillingCity = a.city ?? '';
     editBillingState = a.state ?? '';
     editBillingPostal = a.postal_code ?? '';
@@ -187,39 +192,48 @@
   }
 
   // ── Card form ─────────────────────────────────────────────────────────────
+  // We use the Stripe **Payment Element** (not the legacy Card Element) so
+  // `stripe.confirmSetup({ elements })` works. The Payment Element requires
+  // a `clientSecret` at `stripe.elements({...})` time, so we have to create
+  // the SetupIntent FIRST, then mount the element.
+  let setupCustomerId = $state<string | null>(null);
+
   async function openCardForm() {
     if (!stripe) return;
-    showCardForm = true;
     stripeError = null;
-    await Promise.resolve();
-    if (cardMountEl) {
-      elements = stripe.elements();
-      elements.create('card', {
-        style: {
-          base: {
-            color: 'var(--text-primary, #1a1a1a)',
-            fontFamily: 'system-ui, sans-serif',
-            fontSize: '14px',
-            '::placeholder': { color: 'var(--text-muted, #888)' },
-          },
-        },
-      }).mount(cardMountEl);
+    showCardForm = true;
+    payment.clearError();
+    try {
+      const { client_secret, customer_id } = await createSetupIntent();
+      setupCustomerId = customer_id;
+      await Promise.resolve(); // let cardMountEl bind after the {#if} branch
+      if (!cardMountEl) return;
+      elements = stripe.elements({ clientSecret: client_secret });
+      const paymentElement = elements.create('payment');
+      paymentElement.mount(cardMountEl);
+    } catch (e) {
+      stripeError = e instanceof Error ? e.message : 'Could not start payment setup.';
+      showCardForm = false;
     }
   }
 
   async function handleCardSubmit() {
-    if (!stripe || !elements) return;
+    if (!stripe || !elements || !setupCustomerId) return;
     stripeError = null;
-    await payment.add(stripe, elements);
+    await payment.add(stripe, elements, setupCustomerId);
     if (!payment.error) {
       showCardForm = false;
-      // Pre-fill billing edit state from what just got stored
-      editBillingLine1 = payment.method?.billing_line1 ?? '';
-      editBillingCity = payment.method?.billing_city ?? '';
-      editBillingState = payment.method?.billing_state ?? '';
-      editBillingPostal = payment.method?.billing_postal_code ?? '';
-      editBillingCountry = payment.method?.billing_country ?? '';
+      setupCustomerId = null;
+      const b = payment.billing;
+      editBillingLine1 = b?.line1 ?? '';
+      editBillingLine2 = b?.line2 ?? '';
+      editBillingCity = b?.city ?? '';
+      editBillingState = b?.state ?? '';
+      editBillingPostal = b?.postal_code ?? '';
+      editBillingCountry = b?.country ?? '';
     } else {
+      // payment.error already holds the friendly message; mirror to the
+      // local error so the existing template wiring keeps working.
       stripeError = payment.error;
     }
   }
@@ -261,7 +275,7 @@
   }
 
   const hasBillingAddress = $derived(
-    !!(payment.method?.billing_city || payment.method?.billing_line1),
+    !!(payment.billing?.city || payment.billing?.line1),
   );
 
   const hasHomeAddress = $derived(
@@ -478,8 +492,8 @@
                 <line x1="1" y1="10" x2="23" y2="10" />
               </svg>
               <div class="card-text">
-                <span class="card-number">•••• {payment.method.last4}</span>
-                <span class="card-meta">{formatBrand(payment.method.brand)} · {payment.method.exp_month}/{payment.method.exp_year}</span>
+                <span class="card-number">•••• {payment.method.last4 ?? '••••'}</span>
+                <span class="card-meta">{formatBrand(payment.method.brand ?? '')} · {payment.method.exp_month ?? '--'}/{payment.method.exp_year ?? '----'}</span>
               </div>
             </div>
           </div>
@@ -513,7 +527,11 @@
           <div class="group">
             <div class="field">
               <label class="field-label" for="b-line1">Street</label>
-              <input id="b-line1" class="field-input" type="text" bind:value={editBillingLine1} placeholder="123 Main St" autocomplete="street-address" />
+              <input id="b-line1" class="field-input" type="text" bind:value={editBillingLine1} placeholder="123 Main St" autocomplete="address-line1" />
+            </div>
+            <div class="field">
+              <label class="field-label" for="b-line2">Apt, suite, etc. (optional)</label>
+              <input id="b-line2" class="field-input" type="text" bind:value={editBillingLine2} placeholder="Apt 4B" autocomplete="address-line2" />
             </div>
             <div class="field">
               <label class="field-label" for="b-city">City</label>

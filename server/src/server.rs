@@ -5,7 +5,7 @@ use poem::{
     get, handler,
     listener::TcpListener,
     middleware::{AddData, Cors},
-    post, EndpointExt, Route, Server,
+    post, put, EndpointExt, Route, Server,
 };
 use tracing::info;
 
@@ -14,7 +14,11 @@ use crate::{
     chat::chat_handler,
     db::DbPool,
     llm::LlmClient,
-    payments::{payment_method_handler, payment_setup_handler, PaymentClient},
+    payments::{
+        create_user_payment_method_handler, delete_user_payment_method_handler,
+        get_user_payment_method_handler, payment_method_handler, payment_setup_handler,
+        update_user_billing_handler, PaymentClient,
+    },
     user_info::{get_user_info_handler, update_user_info_handler},
     users::{create_user_handler, users_me_handler},
 };
@@ -55,6 +59,16 @@ pub async fn run(
         .at("/users", post(create_user_handler))
         .at("/users/me", get(users_me_handler))
         .at("/users/me/info", get(get_user_info_handler).put(update_user_info_handler))
+        .at(
+            "/users/me/payment-method",
+            get(get_user_payment_method_handler)
+                .post(create_user_payment_method_handler)
+                .delete(delete_user_payment_method_handler),
+        )
+        .at(
+            "/users/me/payment-method/billing",
+            put(update_user_billing_handler),
+        )
         .with(AddData::new(llm))
         .with(AddData::new(payment))
         .with(AddData::new(pool))

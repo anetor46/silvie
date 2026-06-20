@@ -1,51 +1,49 @@
-import {
-  addPaymentMethod,
-  getStoredPaymentMethod,
-  removeStoredPaymentMethod,
-  storePaymentMethod,
-  type StoredPaymentMethod,
-} from '$lib/services/payment';
 import type { Stripe, StripeElements } from '@stripe/stripe-js';
+import {
+  confirmAndSavePaymentMethod,
+  deletePaymentMethod as serviceDelete,
+  fetchPaymentMethod,
+  updateBillingAddress,
+  type BillingAddress,
+  type BillingPatch,
+  type PaymentMethod,
+  type PaymentMethodView,
+} from '$lib/services/payment';
 
 class PaymentStore {
-  method = $state<StoredPaymentMethod | null>(null);
+  /** The user's saved payment method, or null if none. */
+  method = $state<PaymentMethod | null>(null);
+  /** Billing address linked to the saved card, or null. */
+  billing = $state<BillingAddress | null>(null);
   loading = $state(false);
+  loaded = $state(false);
   error = $state<string | null>(null);
 
   async load(): Promise<void> {
-    try {
-      this.method = await getStoredPaymentMethod();
-    } catch {
-      // Silently ignore on load — keychain may simply be empty
-    }
-  }
-
-  async add(stripe: Stripe, elements: StripeElements): Promise<void> {
     this.loading = true;
     this.error = null;
     try {
-      this.method = await addPaymentMethod(stripe, elements);
+      const view = await fetchPaymentMethod();
+      this.#applyView(view);
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
     } finally {
+      this.loaded = true;
       this.loading = false;
     }
   }
 
-  async updateBilling(patch: {
-    billing_line1?: string | null;
-    billing_city?: string | null;
-    billing_state?: string | null;
-    billing_postal_code?: string | null;
-    billing_country?: string | null;
-  }): Promise<void> {
-    if (!this.method) return;
+  /**
+   * Confirm the Stripe SetupIntent (using the Payment Element that
+   * UserPanel has already mounted with the matching clientSecret), then
+   * persist the card to our backend.
+   */
+  async add(stripe: Stripe, elements: StripeElements, customerId: string): Promise<void> {
     this.loading = true;
     this.error = null;
     try {
-      const updated: StoredPaymentMethod = { ...this.method, ...patch };
-      await storePaymentMethod(updated);
-      this.method = updated;
+      const view = await confirmAndSavePaymentMethod(stripe, elements, customerId);
+      this.#applyView(view);
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -57,13 +55,43 @@ class PaymentStore {
     this.loading = true;
     this.error = null;
     try {
-      await removeStoredPaymentMethod();
+      await serviceDelete();
       this.method = null;
+      this.billing = null;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
     } finally {
       this.loading = false;
     }
+  }
+
+  async updateBilling(patch: BillingPatch): Promise<void> {
+    this.loading = true;
+    this.error = null;
+    try {
+      const view = await updateBillingAddress(patch);
+      this.#applyView(view);
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  reset(): void {
+    this.method = null;
+    this.billing = null;
+    this.loaded = false;
+    this.error = null;
+  }
+
+  clearError(): void {
+    this.error = null;
+  }
+
+  #applyView(view: PaymentMethodView | null): void {
+    this.method = view?.payment_method ?? null;
+    this.billing = view?.billing_address ?? null;
   }
 }
 

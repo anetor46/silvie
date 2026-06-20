@@ -1,10 +1,8 @@
 mod auth;
 mod auth0;
-mod payment;
 
 use auth::ConnectedAccount;
 use auth0::{Auth0Config, AuthUser};
-use payment::StoredPaymentMethod;
 use tauri::State;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -47,21 +45,6 @@ async fn get_google_access_token(config: State<'_, OAuthConfig>) -> Result<Optio
     auth::get_fresh_access_token(&config.client_id, &config.client_secret)
         .await
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn store_payment_method(data: StoredPaymentMethod) -> Result<(), String> {
-    payment::store_payment_method(&data).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn get_payment_method() -> Option<StoredPaymentMethod> {
-    payment::load_payment_method()
-}
-
-#[tauri::command]
-fn remove_payment_method() -> Result<(), String> {
-    payment::remove_payment_method().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -161,9 +144,6 @@ pub fn run() {
             get_google_calendar_account,
             disconnect_google_calendar,
             get_google_access_token,
-            store_payment_method,
-            get_payment_method,
-            remove_payment_method,
             auth0_login,
             auth0_signup,
             auth0_request_password_reset,
