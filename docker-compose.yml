@@ -15,8 +15,8 @@ services:
       AWS_ENDPOINT_URL: "http://aws:4566"
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
-      GEMINY_API_KEY: ${GEMINY_API_KEY}
-      DATABASE_URL: postgres://root:test@postgres:12345/silvie
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      DATABASE_URL: postgres://root:test@postgres:5432/silvie
     env_file:
       - .env
     healthcheck:
