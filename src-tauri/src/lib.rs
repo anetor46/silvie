@@ -1,8 +1,10 @@
 mod auth;
 mod payment;
+mod profile;
 
 use auth::ConnectedAccount;
 use payment::StoredPaymentMethod;
+use profile::StoredProfile;
 use tauri::State;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -62,6 +64,16 @@ fn remove_payment_method() -> Result<(), String> {
     payment::remove_payment_method().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn store_profile(data: StoredProfile) -> Result<(), String> {
+    profile::store_profile(&data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_profile() -> Option<StoredProfile> {
+    profile::load_profile()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialise tracing → logs appear in the terminal running `pnpm tauri dev`.
@@ -94,6 +106,8 @@ pub fn run() {
             store_payment_method,
             get_payment_method,
             remove_payment_method,
+            store_profile,
+            get_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

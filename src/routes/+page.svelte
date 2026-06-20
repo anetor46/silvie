@@ -2,7 +2,7 @@
   import { conversations } from '$lib/stores/conversations.svelte';
   import { streamChat, type ChatMessage } from '$lib/services/chat';
   import { getGoogleAccessToken } from '$lib/services/connectors';
-  import { getStoredPaymentMethod } from '$lib/services/payment';
+  import { payment } from '$lib/stores/payment.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import MessageList from '$lib/components/MessageList.svelte';
   import InputBar from '$lib/components/InputBar.svelte';
@@ -40,7 +40,6 @@
     scrollToBottom();
 
     const googleAccessToken = await getGoogleAccessToken();
-    const storedPm = await getStoredPaymentMethod();
 
     const now = new Date();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -63,8 +62,8 @@
         googleAccessToken,
         timezone,
         currentDatetime,
-        stripeCustomerId: storedPm?.customer_id ?? null,
-        stripePaymentMethodId: storedPm?.payment_method_id ?? null,
+        stripeCustomerId: payment.method?.customer_id ?? null,
+        stripePaymentMethodId: payment.method?.payment_method_id ?? null,
       },
     );
     currentStream = handle;
