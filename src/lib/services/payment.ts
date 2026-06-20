@@ -11,6 +11,12 @@ export interface StoredPaymentMethod {
   brand: string;
   exp_month: number;
   exp_year: number;
+  // Billing address — stored locally, used in booking requests
+  billing_line1?: string | null;
+  billing_city?: string | null;
+  billing_state?: string | null;
+  billing_postal_code?: string | null;
+  billing_country?: string | null;
 }
 
 // ── Tauri keychain commands ───────────────────────────────────────────────────
@@ -73,23 +79,12 @@ async function fetchPaymentMethodDetails(
 
 // ── Full card setup flow ──────────────────────────────────────────────────────
 
-/**
- * Completes the full card-add flow:
- * 1. Backend creates a Stripe Customer + SetupIntent
- * 2. Stripe Elements confirms the card (tokenises it on Stripe's servers)
- * 3. Backend retrieves card metadata (last4, brand, expiry — no card number)
- * 4. Saves the reference IDs + metadata to the OS keychain
- *
- * Returns the stored payment method on success.
- */
 export async function addPaymentMethod(
   stripe: Stripe,
   elements: StripeElements,
 ): Promise<StoredPaymentMethod> {
-  // Step 1: get client_secret + customer_id from our server
   const { client_secret, customer_id } = await createSetupIntent();
 
-  // Step 2: confirm the card via Stripe Elements (card never touches our server)
   const { setupIntent, error } = await stripe.confirmSetup({
     elements,
     confirmParams: { return_url: window.location.href },
@@ -108,10 +103,8 @@ export async function addPaymentMethod(
       ? setupIntent.payment_method
       : setupIntent.payment_method.id;
 
-  // Step 3: fetch display metadata (no card number returned)
   const details = await fetchPaymentMethodDetails(customer_id, payment_method_id);
 
-  // Step 4: persist to OS keychain via Tauri
   const pm: StoredPaymentMethod = {
     customer_id,
     payment_method_id,

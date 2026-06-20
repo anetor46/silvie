@@ -13,6 +13,18 @@ pub struct StoredPaymentMethod {
     pub brand: String,
     pub exp_month: u32,
     pub exp_year: u32,
+
+    // Billing address — optional, stored locally for use in booking requests
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub billing_line1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub billing_city: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub billing_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub billing_postal_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub billing_country: Option<String>,
 }
 
 #[instrument]
