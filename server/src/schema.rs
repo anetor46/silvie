@@ -93,11 +93,28 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    issuing_card_log (id) {
+        id -> Uuid,
+        user_id -> Nullable<Uuid>,
+        payment_method_id -> Nullable<Uuid>,
+        stripe_issuing_card_id -> Text,
+        amount_minor_units -> Int8,
+        currency -> Text,
+        entity_type -> Nullable<Text>,
+        entity_id -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+        cancelled_at -> Nullable<Timestamptz>,
+    }
+}
+
 diesel::joinable!(user_profiles -> users (user_id));
 diesel::joinable!(addresses -> users (user_id));
 diesel::joinable!(travel_documents -> users (user_id));
 diesel::joinable!(payment_methods -> users (user_id));
 diesel::joinable!(payment_methods -> addresses (billing_address_id));
+diesel::joinable!(issuing_card_log -> users (user_id));
+diesel::joinable!(issuing_card_log -> payment_methods (payment_method_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     users,
@@ -105,4 +122,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     addresses,
     travel_documents,
     payment_methods,
+    issuing_card_log,
 );

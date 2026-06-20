@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::{
     auth::Principal,
     db::DbPool,
-    schema::{addresses, payment_methods},
+    schema::{addresses, issuing_card_log, payment_methods},
     users,
 };
 
@@ -786,5 +786,77 @@ pub async fn update_user_billing_handler(
         })?;
     row.map(Json)
         .ok_or_else(|| poem::Error::from_status(StatusCode::NOT_FOUND))
+}
+
+// ── Issuing-card audit log ──────────────────────────────────────────────────
+//
+// Every Stripe Issuing virtual card we create gets a row here so we can
+// reconcile against Stripe's dashboard later. The PAN/CVC are never stored —
+// only the Stripe card ID, the spending limit, and the cancel timestamp.
+//
+// The log is best-effort: a failure here NEVER prevents the booking from
+// proceeding (the financial reality is in Stripe, not our DB).
+
+/// Insert a row marking that a new Stripe Issuing card was created. Looks up
+/// the funding payment_method by its Stripe ID to populate `user_id` and
+/// `payment_method_id`. `currency` is upper-cased to match the CHECK constraint.
+#[instrument(skip(pool), fields(stripe_card_id, stripe_pm_id_len = stripe_pm_id.len(), amount_minor_units, currency))]
+pub async fn log_issuing_card_creation(
+    pool: &DbPool,
+    stripe_pm_id: &str,
+    stripe_card_id: &str,
+    amount_minor_units: i64,
+    currency: &str,
+) -> Result<()> {
+    let mut conn = pool.get().await.context("Failed to get DB connection")?;
+
+    // The payment-method lookup determines who owns this issuing card. If we
+    // can't find it (e.g. the user removed the card between the chat
+    // request and now), still record an orphan row so the operations team
+    // can reconcile with Stripe — just leave user_id / payment_method_id NULL.
+    let pm: Option<(Uuid, Uuid)> = payment_methods::table
+        .filter(payment_methods::stripe_payment_method_id.eq(stripe_pm_id))
+        .filter(payment_methods::deleted_at.is_null())
+        .select((payment_methods::id, payment_methods::user_id))
+        .first(&mut conn)
+        .await
+        .optional()
+        .context("Failed to look up payment method for issuing log")?;
+
+    let (pm_id_opt, user_id_opt) = match pm {
+        Some((pm_id, user_id)) => (Some(pm_id), Some(user_id)),
+        None => (None, None),
+    };
+
+    let currency_uc = currency.to_uppercase();
+    let n: usize = diesel::insert_into(issuing_card_log::table)
+        .values((
+            issuing_card_log::user_id.eq(user_id_opt),
+            issuing_card_log::payment_method_id.eq(pm_id_opt),
+            issuing_card_log::stripe_issuing_card_id.eq(stripe_card_id),
+            issuing_card_log::amount_minor_units.eq(amount_minor_units),
+            issuing_card_log::currency.eq(&currency_uc),
+        ))
+        .execute(&mut conn)
+        .await
+        .context("Failed to insert issuing_card_log row")?;
+    info!(rows = n, "issuing card creation logged");
+    Ok(())
+}
+
+/// Mark the audit-log row's `cancelled_at`. No-op if no row matches.
+#[instrument(skip(pool), fields(stripe_card_id))]
+pub async fn mark_issuing_card_cancelled(pool: &DbPool, stripe_card_id: &str) -> Result<()> {
+    let mut conn = pool.get().await.context("Failed to get DB connection")?;
+    let n: usize = diesel::update(
+        issuing_card_log::table
+            .filter(issuing_card_log::stripe_issuing_card_id.eq(stripe_card_id)),
+    )
+    .set(issuing_card_log::cancelled_at.eq(diesel::dsl::now))
+    .execute(&mut conn)
+    .await
+    .context("Failed to mark issuing_card_log cancelled")?;
+    info!(rows = n, "issuing card cancellation logged");
+    Ok(())
 }
 

@@ -4,7 +4,8 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::payments::PaymentClient;
+use crate::db::DbPool;
+use crate::payments::{log_issuing_card_creation, mark_issuing_card_cancelled, PaymentClient};
 use super::auth::fetch_access_token;
 use super::error::{make_api_error, TravelportError};
 
@@ -20,6 +21,7 @@ pub struct HotelBookTool {
     customer_id: String,
     payment_method_id: String,
     http_client: reqwest::Client,
+    db_pool: DbPool,
 }
 
 impl HotelBookTool {
@@ -29,6 +31,7 @@ impl HotelBookTool {
         stripe_key: String,
         customer_id: String,
         payment_method_id: String,
+        db_pool: DbPool,
     ) -> Self {
         Self {
             tp_client_id,
@@ -37,6 +40,7 @@ impl HotelBookTool {
             customer_id,
             payment_method_id,
             http_client: reqwest::Client::new(),
+            db_pool,
         }
     }
 }
@@ -178,6 +182,21 @@ impl Tool for HotelBookTool {
         let card_last4 = issuing_card.pan.chars().rev().take(4).collect::<Vec<_>>()
             .into_iter().rev().collect::<String>();
 
+        // Audit-log the new Issuing card. Best-effort: the financial reality
+        // is in Stripe; a missed DB write must never block the booking. We
+        // log via warn! and continue.
+        if let Err(e) = log_issuing_card_creation(
+            &self.db_pool,
+            &self.payment_method_id,
+            &card_id,
+            args.total_price_minor_units as i64,
+            &args.currency,
+        )
+        .await
+        {
+            warn!("failed to record issuing_card_log entry for {card_id}: {e:#}");
+        }
+
         // Step 2: Fetch a Travelport+ bearer token.
         let token =
             fetch_access_token(&self.tp_client_id, &self.tp_client_secret, &self.http_client)
@@ -224,6 +243,9 @@ impl Tool for HotelBookTool {
         // Step 4: Cancel the Issuing card regardless of booking outcome.
         if let Err(e) = payment_client.cancel_issuing_card(&card_id).await {
             warn!("failed to cancel Issuing card {card_id}: {e:#}");
+        }
+        if let Err(e) = mark_issuing_card_cancelled(&self.db_pool, &card_id).await {
+            warn!("failed to mark issuing_card_log row cancelled for {card_id}: {e:#}");
         }
 
         if !book_status.is_success() {

@@ -30,6 +30,7 @@ fn friendly_error_message(e: &Error) -> String {
 }
 
 use crate::{
+    db::DbPool,
     llm::LlmClient,
     types::{ChatRequest, SseEvent},
 };
@@ -37,11 +38,13 @@ use crate::{
 #[handler]
 pub async fn chat_handler(
     Data(client): Data<&Arc<LlmClient>>,
+    Data(pool): Data<&DbPool>,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
     debug!("/chat received {} messages", req.messages.len());
 
     let client = client.clone();
+    let pool = pool.clone();
 
     // We need to bridge "model stream produces chunks" → "SSE events".
     // Spawn a task that pulls from the model stream and pushes typed events into
@@ -49,7 +52,7 @@ pub async fn chat_handler(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseEvent>();
 
     tokio::spawn(async move {
-        match client.stream_chat(req.messages, req.google_access_token, req.timezone, req.current_datetime, req.stripe_customer_id, req.stripe_payment_method_id).await {
+        match client.stream_chat(req.messages, req.google_access_token, req.timezone, req.current_datetime, req.stripe_customer_id, req.stripe_payment_method_id, pool).await {
             Ok(mut stream) => {
                 while let Some(item) = stream.next().await {
                     match item {

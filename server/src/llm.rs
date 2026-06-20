@@ -53,6 +53,7 @@ impl LlmClient {
         current_datetime: Option<String>,
         stripe_customer_id: Option<String>,
         stripe_payment_method_id: Option<String>,
+        db_pool: crate::db::DbPool,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let (system_prompt, history, prompt) = split_history(&messages)?;
 
@@ -97,7 +98,7 @@ impl LlmClient {
                 stripe_payment_method_id,
             ) {
                 tools.push(Box::new(HotelBookTool::new(
-                    tp_id, tp_secret, sk, customer_id, pm_id,
+                    tp_id, tp_secret, sk, customer_id, pm_id, db_pool.clone(),
                 )));
             }
         }
