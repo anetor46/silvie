@@ -1,6 +1,7 @@
 <script lang="ts">
   import { conversations } from '$lib/stores/conversations.svelte';
-  import { streamChat } from '$lib/services/chat';
+  import { streamChat, type ChatCallbacks } from '$lib/services/chat';
+  import { postToolResponse, type ToolResponse } from '$lib/services/confirmations';
   import EmptyState from '$lib/components/EmptyState.svelte';
   import MessageList from '$lib/components/MessageList.svelte';
   import InputBar from '$lib/components/InputBar.svelte';
@@ -17,17 +18,59 @@
   ];
 
   function scrollToBottom() {
-    setTimeout(() => messagesEl?.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' }), 10);
+    setTimeout(
+      () => messagesEl?.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' }),
+      10,
+    );
+  }
+
+  function localeContext() {
+    const now = new Date();
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const offsetMin = -now.getTimezoneOffset();
+    const sign = offsetMin >= 0 ? '+' : '-';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const hh = pad(Math.floor(Math.abs(offsetMin) / 60));
+    const mm = pad(Math.abs(offsetMin) % 60);
+    const currentDatetime = new Date(now.getTime() - now.getTimezoneOffset() * 60_000)
+      .toISOString()
+      .replace('Z', `${sign}${hh}:${mm}`);
+    return { timezone, currentDatetime };
+  }
+
+  /** Build a fresh set of callbacks that pipe SSE events into the
+   *  conversation store. Tokens for the resume stream go into a *new*
+   *  assistant placeholder created lazily on first token. */
+  function makeCallbacks(): ChatCallbacks {
+    let assistantId: string | null = null;
+    return {
+      onToken: (chunk) => {
+        if (!assistantId) {
+          assistantId = conversations.startAssistantMessage();
+        }
+        conversations.appendToAssistant(assistantId, chunk);
+        scrollToBottom();
+      },
+      onToolCall: (call) => {
+        // Close out any in-progress assistant text so the next text token
+        // creates a new bubble below the tool card.
+        assistantId = null;
+        conversations.appendToolCall(call);
+        scrollToBottom();
+      },
+      onToolResult: (result) => {
+        conversations.updateToolResult(result.callId, result.success, result.summary);
+        scrollToBottom();
+      },
+    };
   }
 
   async function sendMessage() {
     const text = inputValue.trim();
     if (!text) return;
 
-    // Abort any in-flight generation.
     currentStream?.cancel();
 
-    // Lazily create the conversation on the backend if this is a fresh chat.
     const isFirstMessage = !conversations.currentId;
     let conversationId: string;
     try {
@@ -41,54 +84,49 @@
     inputValue = '';
     scrollToBottom();
 
-    const assistantId = conversations.startAssistantMessage();
-    scrollToBottom();
-
-    const now = new Date();
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const offsetMin = -now.getTimezoneOffset();
-    const sign = offsetMin >= 0 ? '+' : '-';
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const hh = pad(Math.floor(Math.abs(offsetMin) / 60));
-    const mm = pad(Math.abs(offsetMin) % 60);
-    const currentDatetime = new Date(now.getTime() - now.getTimezoneOffset() * 60_000)
-      .toISOString()
-      .replace('Z', `${sign}${hh}:${mm}`);
-
-    const handle = streamChat(
-      conversationId,
-      text,
-      {
-        onToken: (chunk) => {
-          conversations.appendToAssistant(assistantId, chunk);
-          scrollToBottom();
-        },
-        onToolCall: (call) => {
-          conversations.appendToolCall(call);
-          scrollToBottom();
-        },
-        onToolResult: (result) => {
-          conversations.updateToolResult(result.callId, result.success, result.summary);
-          scrollToBottom();
-        },
-      },
-      { timezone, currentDatetime },
-    );
+    const handle = streamChat(conversationId, text, makeCallbacks(), localeContext());
     currentStream = handle;
 
     handle.done
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === 'AbortError') return;
         const message = err instanceof Error ? err.message : String(err);
-        conversations.appendToAssistant(assistantId, `\n\n_⚠️ ${message}_`);
+        const id = conversations.startAssistantMessage();
+        conversations.appendToAssistant(id, `\n\n_⚠️ ${message}_`);
       })
       .finally(() => {
         if (currentStream === handle) currentStream = null;
-        // First-message titles are auto-generated server-side — pull the
-        // updated sidebar row so the title appears immediately.
         if (isFirstMessage) {
           void conversations.refreshCurrentInList();
         }
+      });
+  }
+
+  /** Called by the confirmation widget when the user clicks Approve / Reject
+   *  (or, in future, makes any other kind of tool-response choice). Records
+   *  the local decision so the buttons collapse into a badge, then starts a
+   *  new SSE stream that emits the tool result + any follow-up assistant
+   *  text the resumed agent produces. */
+  async function handleToolResponse(callId: string, response: ToolResponse): Promise<void> {
+    currentStream?.cancel();
+
+    if (response.kind === 'confirmation') {
+      conversations.setDecision(callId, response.approved ? 'approved' : 'rejected');
+    }
+    scrollToBottom();
+
+    const handle = postToolResponse(callId, response, makeCallbacks(), localeContext());
+    currentStream = handle;
+
+    await handle.done
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        const message = err instanceof Error ? err.message : String(err);
+        const id = conversations.startAssistantMessage();
+        conversations.appendToAssistant(id, `\n\n_⚠️ ${message}_`);
+      })
+      .finally(() => {
+        if (currentStream === handle) currentStream = null;
       });
   }
 
@@ -101,7 +139,7 @@
   {#if conversations.currentMessages.length === 0}
     <EmptyState {suggestions} onSuggestionClick={handleSuggestion} />
   {:else}
-    <MessageList messages={conversations.currentMessages} />
+    <MessageList messages={conversations.currentMessages} onToolResponse={handleToolResponse} />
   {/if}
 </main>
 
@@ -114,14 +152,8 @@
     scroll-behavior: smooth;
   }
 
-  .chat-area::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .chat-area::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
+  .chat-area::-webkit-scrollbar { width: 6px; }
+  .chat-area::-webkit-scrollbar-track { background: transparent; }
   .chat-area::-webkit-scrollbar-thumb {
     background: var(--border-strong);
     border-radius: 3px;

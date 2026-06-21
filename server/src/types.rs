@@ -1,21 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: Role,
-    pub content: String,
-}
-
 /// New chat request shape. The server is authoritative for the user's
 /// conversation history and integration tokens — the client just sends the
 /// new user turn plus the conversation id and small per-request context

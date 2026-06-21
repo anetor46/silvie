@@ -1,52 +1,59 @@
-//! Generic tool wrapper that handles two cross-cutting concerns:
+//! Generic tool wrapper handling two cross-cutting concerns:
 //!
-//! 1. **Visualization.** Every wrapped tool emits a `ToolEvent::Call` on the
-//!    side channel before executing and a `ToolEvent::Result` after — these
-//!    flow through the chat stream into the frontend as status cards.
-//! 2. **Confirmation gating.** Tools marked as `Write` block on a
-//!    `ConfirmationRegistry` entry before executing. The frontend presents
-//!    Approve / Reject buttons; the `/chat/confirmations` endpoint resolves
-//!    the registry entry which unblocks the call.
+//! 1. **Visualization.** Every wrapped tool emits a `ToolEvent::Call` to the
+//!    side channel before executing, and (for read tools) a
+//!    `ToolEvent::Result` after.
+//! 2. **Confirmation gating — non-blocking.** Write tools DON'T execute their
+//!    inner logic during the agent stream. They persist the pending call
+//!    args, emit the `Call` event (with `requires_confirmation: true`), and
+//!    immediately return a sentinel `Awaiting` output that the preamble
+//!    teaches the model to recognise — the agent turn ends naturally with a
+//!    short ack from the model.
 //!
-//! Wrap a tool: `ToolWrapper::new_read(inner, tx)` for read tools or
-//! `ToolWrapper::new_write(inner, tx, registry)` for write tools. The
-//! wrapper is itself a `rig::Tool` with the same NAME / Args / Output as
-//! its inner — so it is a drop-in replacement at the rig registration site.
-
-use std::sync::Arc;
-use std::time::Duration;
+//! Actual execution happens later in `tool_dispatch::execute_pending` when
+//! the user clicks Approve in the `/chat/tool-responses` endpoint.
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::Serialize;
-use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::confirmation::{ConfirmationRegistry, Decision};
 use crate::types::ToolEvent;
-
-/// Wait at most this long for the user to approve / reject a write tool
-/// before timing out and erroring back to the model. Kept generous since
-/// the user may step away briefly while composing.
-const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, thiserror::Error)]
 pub enum WrapperError<E> {
-    #[error("user rejected the action{}", .reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default())]
-    Rejected { reason: Option<String> },
-    #[error("user did not respond in time")]
-    Timeout,
-    #[error("confirmation cancelled")]
-    Cancelled,
     #[error(transparent)]
     Inner(E),
 }
 
+/// What the model sees as the tool's output. With `#[serde(untagged)]` this
+/// serialises transparently — `Done(t)` looks just like `t`, and
+/// `Awaiting(...)` looks like the awaiting marker JSON.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum WrappedOutput<T> {
+    Done(T),
+    Awaiting(AwaitingMarker),
+}
+
+#[derive(Debug, Serialize)]
+pub struct AwaitingMarker {
+    pub status: &'static str,
+    pub message: &'static str,
+}
+
+const AWAITING: AwaitingMarker = AwaitingMarker {
+    status: "awaiting_user_input",
+    message:
+        "The user must approve or reject this action via the UI before it runs. \
+         Respond with a brief one-line acknowledgement (e.g. \"Waiting for your confirmation.\") \
+         and DO NOT call any further tools in this turn.",
+};
+
 pub struct ToolWrapper<T: Tool> {
     inner: T,
     tx: tokio::sync::mpsc::UnboundedSender<ToolEvent>,
-    /// `Some` for write tools, `None` for read tools.
-    confirmation: Option<Arc<ConfirmationRegistry>>,
+    requires_confirmation: bool,
 }
 
 impl<T: Tool> ToolWrapper<T> {
@@ -54,19 +61,15 @@ impl<T: Tool> ToolWrapper<T> {
         Self {
             inner,
             tx,
-            confirmation: None,
+            requires_confirmation: false,
         }
     }
 
-    pub fn new_write(
-        inner: T,
-        tx: tokio::sync::mpsc::UnboundedSender<ToolEvent>,
-        registry: Arc<ConfirmationRegistry>,
-    ) -> Self {
+    pub fn new_write(inner: T, tx: tokio::sync::mpsc::UnboundedSender<ToolEvent>) -> Self {
         Self {
             inner,
             tx,
-            confirmation: Some(registry),
+            requires_confirmation: true,
         }
     }
 }
@@ -79,7 +82,7 @@ where
     const NAME: &'static str = T::NAME;
     type Error = WrapperError<T::Error>;
     type Args = T::Args;
-    type Output = T::Output;
+    type Output = WrappedOutput<T::Output>;
 
     async fn definition(&self, prompt: String) -> ToolDefinition {
         self.inner.definition(prompt).await
@@ -88,61 +91,22 @@ where
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let call_id = Uuid::new_v4().to_string();
         let args_json = serde_json::to_value(&args).unwrap_or(serde_json::Value::Null);
-        let requires_confirmation = self.confirmation.is_some();
 
-        // 1. Announce the call to the frontend.
+        // Always announce the call to the frontend.
         let _ = self.tx.send(ToolEvent::Call {
             call_id: call_id.clone(),
             name: T::NAME.to_string(),
             args: args_json,
-            requires_confirmation,
+            requires_confirmation: self.requires_confirmation,
         });
 
-        // 2. If write, block on user decision.
-        if let Some(registry) = &self.confirmation {
-            let rx = registry.register(call_id.clone());
-            let decision = match tokio::time::timeout(CONFIRMATION_TIMEOUT, rx).await {
-                Ok(Ok(d)) => d,
-                Ok(Err(_)) => {
-                    warn!(call_id, "confirmation sender dropped before responding");
-                    let _ = self.tx.send(ToolEvent::Result {
-                        call_id: call_id.clone(),
-                        success: false,
-                        summary: Some("confirmation cancelled".into()),
-                    });
-                    return Err(WrapperError::Cancelled);
-                }
-                Err(_) => {
-                    warn!(call_id, "confirmation timed out");
-                    registry.drop_entry(&call_id);
-                    let _ = self.tx.send(ToolEvent::Result {
-                        call_id: call_id.clone(),
-                        success: false,
-                        summary: Some("user did not respond in time".into()),
-                    });
-                    return Err(WrapperError::Timeout);
-                }
-            };
-
-            if let Decision::Rejected { reason } = decision {
-                info!(call_id, ?reason, "user rejected tool call");
-                let _ = self.tx.send(ToolEvent::Result {
-                    call_id: call_id.clone(),
-                    success: false,
-                    summary: Some(
-                        reason
-                            .clone()
-                            .map(|r| format!("rejected: {r}"))
-                            .unwrap_or_else(|| "rejected by user".into()),
-                    ),
-                });
-                return Err(WrapperError::Rejected { reason });
-            }
-
-            info!(call_id, "user approved tool call");
+        // Write tool: defer execution. The `/chat/tool-responses` endpoint
+        // will run the actual work after the user clicks Approve.
+        if self.requires_confirmation {
+            return Ok(WrappedOutput::Awaiting(AWAITING));
         }
 
-        // 3. Execute and emit result.
+        // Read tool: run inline and emit the result event.
         match self.inner.call(args).await {
             Ok(out) => {
                 let _ = self.tx.send(ToolEvent::Result {
@@ -150,7 +114,7 @@ where
                     success: true,
                     summary: None,
                 });
-                Ok(out)
+                Ok(WrappedOutput::Done(out))
             }
             Err(e) => {
                 let msg = e.to_string();

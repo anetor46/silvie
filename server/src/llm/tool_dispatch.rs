@@ -1,0 +1,144 @@
+//! Out-of-stream execution of a previously-deferred write tool call.
+//!
+//! When a write tool is called during a chat stream, the `ToolWrapper` only
+//! records its intent (args persisted to DB, ToolCall event emitted) — the
+//! actual side-effect doesn't run until the user approves via
+//! `/chat/tool-responses`. That endpoint calls into this module to do the
+//! deferred work, then resumes the conversation with the real result in
+//! history.
+
+use anyhow::{anyhow, Result};
+use rig::tool::Tool;
+use serde::Serialize;
+use tracing::error;
+
+use crate::config::{Config, StripeConfig, TravelportCredentials};
+use crate::db::DbPool;
+use crate::llm::context::{StripePaymentRefs, ToolAuth};
+use crate::tools::gmail::{ReplyToEmailTool, SendEmailTool};
+use crate::tools::google_calendar::{
+    CreateCalendarEventTool, DeleteCalendarEventTool, RespondToEventTool, UpdateCalendarEventTool,
+};
+use crate::tools::travelport::HotelBookTool;
+
+/// Result of a deferred tool execution. Both fields end up in the DB row's
+/// updated payload + the SSE `ToolResult` event the frontend sees.
+pub struct ExecOutcome {
+    pub success: bool,
+    pub summary: Option<String>,
+    pub output: Option<serde_json::Value>,
+}
+
+/// Run the write tool identified by `tool_name` with the previously-stored
+/// `args_json`. The caller is responsible for persisting the outcome to the
+/// DB and emitting the `ToolResult` event.
+pub async fn execute_pending(
+    config: &Config,
+    db_pool: &DbPool,
+    tool_auth: &ToolAuth,
+    tool_name: &str,
+    args_json: &serde_json::Value,
+) -> Result<ExecOutcome> {
+    match tool_name {
+        "send_email" => {
+            let token = require_google(tool_auth)?;
+            let tool = SendEmailTool::new(token);
+            run(&tool, args_json).await
+        }
+        "reply_to_email" => {
+            let token = require_google(tool_auth)?;
+            let tool = ReplyToEmailTool::new(token);
+            run(&tool, args_json).await
+        }
+        "create_calendar_event" => {
+            let token = require_google(tool_auth)?;
+            let tool = CreateCalendarEventTool::new(token);
+            run(&tool, args_json).await
+        }
+        "update_calendar_event" => {
+            let token = require_google(tool_auth)?;
+            let tool = UpdateCalendarEventTool::new(token);
+            run(&tool, args_json).await
+        }
+        "delete_calendar_event" => {
+            let token = require_google(tool_auth)?;
+            let tool = DeleteCalendarEventTool::new(token);
+            run(&tool, args_json).await
+        }
+        "respond_to_event" => {
+            let token = require_google(tool_auth)?;
+            let tool = RespondToEventTool::new(token);
+            run(&tool, args_json).await
+        }
+        "hotel_book" => {
+            let stripe: &StripeConfig = config
+                .stripe
+                .as_ref()
+                .ok_or_else(|| anyhow!("Stripe is not configured"))?;
+            let tp: &TravelportCredentials = config
+                .travelport
+                .as_ref()
+                .ok_or_else(|| anyhow!("Travelport is not configured"))?;
+            let pm: &StripePaymentRefs = tool_auth
+                .stripe_payment
+                .as_ref()
+                .ok_or_else(|| anyhow!("no saved payment method on file"))?;
+            let tool = HotelBookTool::new(
+                tp.client_id.clone(),
+                tp.client_secret.clone(),
+                stripe.secret_key.clone(),
+                pm.customer_id.clone(),
+                pm.payment_method_id.clone(),
+                db_pool.clone(),
+            );
+            run(&tool, args_json).await
+        }
+        _ => Err(anyhow!("unknown write tool: {tool_name}")),
+    }
+}
+
+fn require_google(tool_auth: &ToolAuth) -> Result<String> {
+    tool_auth
+        .google_access_token
+        .clone()
+        .ok_or_else(|| anyhow!("Google access token unavailable"))
+}
+
+/// Generic helper that decodes the stored args JSON into the tool's typed
+/// `Args`, runs it, and packages the result into an `ExecOutcome`.
+async fn run<T>(tool: &T, args_json: &serde_json::Value) -> Result<ExecOutcome>
+where
+    T: Tool,
+    T::Output: Serialize,
+{
+    let args: T::Args = match serde_json::from_value(args_json.clone()) {
+        Ok(a) => a,
+        Err(e) => {
+            error!("failed to decode tool args: {e:#}");
+            return Ok(ExecOutcome {
+                success: false,
+                summary: Some(format!("invalid arguments: {e}")),
+                output: None,
+            });
+        }
+    };
+    match tool.call(args).await {
+        Ok(out) => {
+            let output_json = serde_json::to_value(&out).ok();
+            Ok(ExecOutcome {
+                success: true,
+                summary: None,
+                output: output_json,
+            })
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            error!("deferred tool execution failed: {msg}");
+            Ok(ExecOutcome {
+                success: false,
+                summary: Some(msg),
+                output: None,
+            })
+        }
+    }
+}

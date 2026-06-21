@@ -1,8 +1,7 @@
 <script lang="ts">
   import type { ToolCallEntry } from '$lib/types';
   import { getToolInfo } from '$lib/data/tools';
-  import { postConfirmation } from '$lib/services/confirmations';
-  import { conversations } from '$lib/stores/conversations.svelte';
+  import type { ToolResponse } from '$lib/services/confirmations';
   import EmailSendWidget from './widgets/EmailSendWidget.svelte';
   import EmailReplyWidget from './widgets/EmailReplyWidget.svelte';
   import CalendarEventCreateWidget from './widgets/CalendarEventCreateWidget.svelte';
@@ -11,7 +10,15 @@
   import CalendarEventRespondWidget from './widgets/CalendarEventRespondWidget.svelte';
   import HotelBookWidget from './widgets/HotelBookWidget.svelte';
 
-  let { toolCall }: { toolCall: ToolCallEntry } = $props();
+  let {
+    toolCall,
+    onRespond,
+  }: {
+    toolCall: ToolCallEntry;
+    /** Owner (the chat page) handles the resume SSE stream so it can pipe
+     *  follow-up tokens / tool calls into the conversation store. */
+    onRespond: (callId: string, response: ToolResponse) => Promise<void>;
+  } = $props();
 
   const widgetKind = $derived(getToolInfo(toolCall.name).widget);
   let busy = $state(false);
@@ -22,8 +29,7 @@
     busy = true;
     error = null;
     try {
-      await postConfirmation(toolCall.callId, approved);
-      conversations.setDecision(toolCall.callId, approved ? 'approved' : 'rejected');
+      await onRespond(toolCall.callId, { kind: 'confirmation', approved });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -114,21 +120,14 @@
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
   }
-  button:hover:not(:disabled) {
-    background: var(--surface-2);
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+  button:hover:not(:disabled) { background: var(--surface-2); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
   .approve {
     background: var(--purple-600);
     color: #fff;
     border-color: var(--purple-600);
   }
-  .approve:hover:not(:disabled) {
-    background: var(--purple-800);
-  }
+  .approve:hover:not(:disabled) { background: var(--purple-800); }
 
   .badge {
     align-self: flex-end;
@@ -137,14 +136,8 @@
     padding: 4px 10px;
     border-radius: 8px;
   }
-  .badge.approved {
-    background: #dcfce7;
-    color: #166534;
-  }
-  .badge.rejected {
-    background: #fee2e2;
-    color: #991b1b;
-  }
+  .badge.approved { background: #dcfce7; color: #166534; }
+  .badge.rejected { background: #fee2e2; color: #991b1b; }
 
   .error {
     margin: 0;

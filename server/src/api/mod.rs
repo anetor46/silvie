@@ -2,8 +2,8 @@
 //! [`crate::repos`] / [`crate::services`], and shape the response.
 
 pub mod chat;
-pub mod confirmations;
 pub mod conversations;
+pub mod tool_responses;
 pub mod integrations;
 pub mod payments;
 pub mod user_info;

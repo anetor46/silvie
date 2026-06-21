@@ -1,4 +1,6 @@
-//! `POST /chat` — SSE-streamed chat handler.
+//! `POST /chat` — start a new chat turn from a user message and stream the
+//! response. The bulk of the streaming machinery lives in `chat_stream` so
+//! the `/chat/tool-responses` endpoint can reuse it for continuations.
 
 use std::sync::Arc;
 
@@ -13,18 +15,22 @@ use poem::{
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error};
+use uuid::Uuid;
 
 use crate::{
     auth::AuthUser,
     db::DbPool,
     error::{ApiError, ApiResult, ResultOptionExt},
-    llm::{ChatTurn, LlmClient, LocaleContext, StripePaymentRefs, ToolAuth},
+    llm::{
+        history::db_rows_to_rig_history, ChatTurn, LlmClient, LocaleContext, StripePaymentRefs,
+        ToolAuth,
+    },
     repos::{
         conversations::{self, ToolMessageContent},
         integrations::{self, IntegrationsConfig, GOOGLE_PROVIDER},
         payments,
     },
-    types::{ChatEvent, ChatMessage, ChatRequest, Role, SseEvent},
+    types::{ChatEvent, ChatRequest, SseEvent},
 };
 
 fn friendly_error_message(e: &Error) -> String {
@@ -57,12 +63,12 @@ pub async fn chat_handler(
         "/chat received"
     );
 
-    // 1. Authorize: the user must own this conversation.
+    // 1. Authorize.
     let convo = conversations::find_owned(pool, auth.user.id, req.conversation_id)
         .await
         .into_required()?;
 
-    // 2. Persist the user message immediately.
+    // 2. Persist the user message before doing anything else.
     conversations::insert_user_message(pool, convo.id, &req.content)
         .await
         .map_err(ApiError::from)?;
@@ -72,83 +78,73 @@ pub async fn chat_handler(
         error!("failed to set conversation title: {e:#}");
     }
 
-    // 4. Look up integration tokens + payment IDs server-side.
-    let google_access_token = integrations::fresh_access_token(
-        pool,
-        integ_cfg,
-        auth.user.id,
-        GOOGLE_PROVIDER,
-    )
-    .await
-    .inspect_err(|e| error!("failed to fetch Google access token: {e:#}"))
-    .ok()
-    .flatten()
-    .map(|t| t.access_token);
+    // 4. Build per-request context.
+    let locale = LocaleContext {
+        timezone: req.timezone,
+        current_datetime: req.current_datetime,
+    };
+    let tool_auth = build_tool_auth(pool, integ_cfg, auth.user.id).await;
 
-    let stripe_payment = payments::fetch_payment_method(pool, auth.user.id)
-        .await
-        .ok()
-        .flatten()
-        .map(|view| StripePaymentRefs {
-            customer_id: view.payment_method.stripe_customer_id,
-            payment_method_id: view.payment_method.stripe_payment_method_id,
-        });
-
-    // 5. Load full history (includes the user message we just inserted).
-    let history = conversations::load_history(pool, convo.id)
+    // 5. History excludes the user message we just inserted — pass it as the
+    //    explicit prompt for this turn.
+    let rows = conversations::load_history(pool, convo.id)
         .await
         .map_err(ApiError::from)?;
-    let messages: Vec<ChatMessage> = history
-        .into_iter()
-        .filter_map(|m| {
-            let role = match m.role.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                // 'tool' rows are filtered out — they're frontend visualization
-                // only; rig handles tool round-trips within a single agent stream.
-                _ => return None,
-            };
-            Some(ChatMessage { role, content: m.content })
-        })
+    let history_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| !(r.role == "user" && r.content == req.content))
+        .cloned()
         .collect();
+    let history = db_rows_to_rig_history(&history_rows);
 
-    let client = client.clone();
-    let pool_for_save = pool.clone();
-    let convo_id = convo.id;
     let turn = ChatTurn {
-        messages,
-        locale: LocaleContext {
-            timezone: req.timezone,
-            current_datetime: req.current_datetime,
-        },
-        tool_auth: ToolAuth {
-            google_access_token,
-            stripe_payment,
-        },
+        history,
+        prompt: req.content,
+        locale,
+        tool_auth,
     };
 
+    let events = run_turn(client.clone(), pool.clone(), convo.id, turn);
+    Ok(SSE::new(sse_events(events)).keep_alive(std::time::Duration::from_secs(15)))
+}
+
+/// Wrap a stream of typed `SseEvent`s as poem SSE frames.
+pub fn sse_events<S>(events: S) -> impl futures::Stream<Item = Event> + Send + 'static
+where
+    S: futures::Stream<Item = SseEvent> + Send + 'static,
+{
+    events.map(|ev| {
+        let payload = serde_json::to_string(&ev).unwrap_or_else(|_| {
+            r#"{"type":"error","message":"failed to encode event"}"#.to_string()
+        });
+        Event::message(payload)
+    })
+}
+
+/// Shared streaming machinery used by both `/chat` and
+/// `/chat/tool-responses`. Spawns a task that drives `LlmClient::stream`,
+/// persists tool rows and assistant text as events arrive, and returns a
+/// stream of typed `SseEvent`s the caller wraps as SSE (optionally
+/// prepending its own events).
+pub fn run_turn(
+    client: Arc<LlmClient>,
+    pool: DbPool,
+    convo_id: Uuid,
+    turn: ChatTurn,
+) -> UnboundedReceiverStream<SseEvent> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseEvent>();
 
     tokio::spawn(async move {
-        // Buffer of assistant text emitted between tool calls. Flushed
-        // (as one row) when a tool call arrives, and again at stream end.
         let mut text_buffer = String::new();
         let mut client_disconnected = false;
 
-        // Helper: emit an SSE event if the client is still connected.
         let send = |ev: SseEvent, disconnected: &mut bool| {
             if !*disconnected && tx.send(ev).is_err() {
                 *disconnected = true;
             }
         };
 
-        // Helper: persist the current text buffer as one assistant row.
-        async fn flush_text(
-            buffer: &mut String,
-            pool: &DbPool,
-            convo_id: uuid::Uuid,
-        ) {
+        async fn flush_text(buffer: &mut String, pool: &DbPool, convo_id: Uuid) {
             if buffer.is_empty() {
                 return;
             }
@@ -175,9 +171,7 @@ pub async fn chat_handler(
                             args,
                             requires_confirmation,
                         }) => {
-                            // Flush any accumulated assistant text first so
-                            // row ordering reflects interleaving.
-                            flush_text(&mut text_buffer, &pool_for_save, convo_id).await;
+                            flush_text(&mut text_buffer, &pool, convo_id).await;
 
                             let status = if requires_confirmation {
                                 "pending_user"
@@ -190,13 +184,10 @@ pub async fn chat_handler(
                                 status: status.into(),
                                 summary: None,
                                 success: None,
+                                output: None,
                             };
                             if let Err(e) = conversations::upsert_tool_call(
-                                &pool_for_save,
-                                convo_id,
-                                &call_id,
-                                &name,
-                                &payload,
+                                &pool, convo_id, &call_id, &name, &payload,
                             )
                             .await
                             {
@@ -217,18 +208,16 @@ pub async fn chat_handler(
                             success,
                             summary,
                         }) => {
-                            // The args/name/requires_confirmation fields stay
-                            // as recorded by the prior ToolCall row — we
-                            // reload, mutate, and re-save.
-                            let updated = load_and_update_tool_status(
-                                &pool_for_save,
+                            if let Err(e) = update_tool_status_in_db(
+                                &pool,
                                 convo_id,
                                 &call_id,
                                 success,
                                 summary.clone(),
+                                None,
                             )
-                            .await;
-                            if let Err(e) = updated {
+                            .await
+                            {
                                 error!("failed to update tool_call row: {e:#}");
                             }
                             send(
@@ -245,9 +234,7 @@ pub async fn chat_handler(
                             let friendly = friendly_error_message(&e);
                             text_buffer.push_str(&friendly);
                             send(
-                                SseEvent::Token {
-                                    text: friendly,
-                                },
+                                SseEvent::Token { text: friendly },
                                 &mut client_disconnected,
                             );
                             send(SseEvent::Done, &mut client_disconnected);
@@ -259,9 +246,8 @@ pub async fn chat_handler(
             }
             Err(e) => {
                 error!("failed to start chat stream: {e:#}");
-                let fallback =
-                    "I encountered an issue getting ready to respond. Please try again."
-                        .to_string();
+                let fallback = "I encountered an issue getting ready to respond. Please try again."
+                    .to_string();
                 text_buffer.push_str(&fallback);
                 send(
                     SseEvent::Token { text: fallback },
@@ -271,29 +257,51 @@ pub async fn chat_handler(
             }
         }
 
-        // Final flush of any trailing assistant text.
-        flush_text(&mut text_buffer, &pool_for_save, convo_id).await;
+        flush_text(&mut text_buffer, &pool, convo_id).await;
     });
 
-    let event_stream = UnboundedReceiverStream::new(rx).map(|ev| {
-        let payload = serde_json::to_string(&ev).unwrap_or_else(|_| {
-            r#"{"type":"error","message":"failed to encode event"}"#.to_string()
-        });
-        Event::message(payload)
-    });
-
-    Ok(SSE::new(event_stream).keep_alive(std::time::Duration::from_secs(15)))
+    UnboundedReceiverStream::new(rx)
 }
 
-/// Re-read the tool row's stored content, merge new result fields, save.
-/// Done in the chat handler (rather than the repo) since the repo's upsert
-/// helper is generic; this is the result-specific mutation pattern.
-async fn load_and_update_tool_status(
+/// Look up Google + Stripe credentials for the user. Both are optional —
+/// the LLM client gracefully skips tools whose deps are missing.
+pub async fn build_tool_auth(
     pool: &DbPool,
-    conv_id: uuid::Uuid,
+    integ_cfg: &IntegrationsConfig,
+    user_id: Uuid,
+) -> ToolAuth {
+    let google_access_token =
+        integrations::fresh_access_token(pool, integ_cfg, user_id, GOOGLE_PROVIDER)
+            .await
+            .inspect_err(|e| error!("failed to fetch Google access token: {e:#}"))
+            .ok()
+            .flatten()
+            .map(|t| t.access_token);
+
+    let stripe_payment = payments::fetch_payment_method(pool, user_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|view| StripePaymentRefs {
+            customer_id: view.payment_method.stripe_customer_id,
+            payment_method_id: view.payment_method.stripe_payment_method_id,
+        });
+
+    ToolAuth {
+        google_access_token,
+        stripe_payment,
+    }
+}
+
+/// Merge a tool result event into the corresponding DB row's JSON payload.
+/// Used by both the live stream loop and the deferred-execution path.
+pub async fn update_tool_status_in_db(
+    pool: &DbPool,
+    conv_id: Uuid,
     call_id: &str,
     success: bool,
     summary: Option<String>,
+    output: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
     use crate::schema::messages;
     use diesel::{ExpressionMethods, OptionalExtension, QueryDsl};
@@ -308,18 +316,12 @@ async fn load_and_update_tool_status(
         .await
         .optional()?;
 
-    let Some((content, tool_name)) = existing else {
-        // No prior ToolCall row was persisted — synthesise a minimal one.
-        let payload = ToolMessageContent {
-            args: serde_json::Value::Null,
-            requires_confirmation: false,
-            status: if success { "success".into() } else { "error".into() },
-            summary,
-            success: Some(success),
-        };
-        return conversations::upsert_tool_call(pool, conv_id, call_id, "unknown", &payload)
-            .await
-            .map(|_| ());
+    let (content, tool_name) = match existing {
+        Some(v) => v,
+        None => (
+            "{}".to_string(),
+            Some("unknown".to_string()),
+        ),
     };
 
     let mut payload: ToolMessageContent =
@@ -329,11 +331,15 @@ async fn load_and_update_tool_status(
             status: "running".into(),
             summary: None,
             success: None,
+            output: None,
         });
     payload.status = if success { "success".into() } else { "error".into() };
     payload.success = Some(success);
     if summary.is_some() {
         payload.summary = summary;
+    }
+    if output.is_some() {
+        payload.output = output;
     }
 
     let tool_name = tool_name.as_deref().unwrap_or("unknown");

@@ -1,12 +1,10 @@
 use std::pin::Pin;
-use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use futures::{stream, Stream, StreamExt};
 use rig::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
-    completion::Message,
     providers::gemini,
     streaming::{StreamedAssistantContent, StreamingChat},
     tool::ToolDyn,
@@ -21,9 +19,8 @@ use crate::tools::google_calendar::{
     RespondToEventTool, UpdateCalendarEventTool,
 };
 use crate::tools::travelport::{HotelBookTool, HotelSearchTool};
-use crate::types::{ChatEvent, ChatMessage, Role, ToolEvent};
+use crate::types::{ChatEvent, ToolEvent};
 
-use super::confirmation::ConfirmationRegistry;
 use super::context::{ChatTurn, LocaleContext, StripePaymentRefs, ToolAuth};
 use super::harness::ToolWrapper;
 
@@ -32,27 +29,20 @@ const DEFAULT_MODEL: &str = "gemini-3.1-flash-lite";
 const CALENDAR_PREAMBLE_TEMPLATE: &str = include_str!("../../prompts/google_calendar/preamble.md");
 const GMAIL_PREAMBLE: &str = include_str!("../../prompts/gmail/preamble.md");
 const HOTEL_PREAMBLE: &str = include_str!("../../prompts/travelport/preamble.md");
+const CONFIRMATION_PREAMBLE: &str = include_str!("../../prompts/confirmation/preamble.md");
 
 /// LLM client with all persistent dependencies attached. One instance per
-/// process; cloning is cheap (everything is `Arc`-internal or `Copy`-ish).
+/// process; cloning is cheap.
 pub struct LlmClient {
     gemini: gemini::Client,
     model: String,
     db_pool: DbPool,
     stripe: Option<StripeConfig>,
     travelport: Option<TravelportCredentials>,
-    confirmation_registry: Arc<ConfirmationRegistry>,
 }
 
 impl LlmClient {
-    /// Build the client. Returns an error if the Gemini SDK can't initialise
-    /// (rather than panicking like the previous `new()` did).
-    pub fn new(
-        api_key: &str,
-        config: &Config,
-        db_pool: DbPool,
-        confirmation_registry: Arc<ConfirmationRegistry>,
-    ) -> Result<Self> {
+    pub fn new(api_key: &str, config: &Config, db_pool: DbPool) -> Result<Self> {
         let gemini = gemini::Client::new(api_key)
             .map_err(|e| anyhow!("failed to build Gemini client: {e}"))?;
         Ok(Self {
@@ -61,34 +51,27 @@ impl LlmClient {
             db_pool,
             stripe: config.stripe.clone(),
             travelport: config.travelport.clone(),
-            confirmation_registry,
         })
     }
 
-    /// Stream one chat turn. Returns a stream of `ChatEvent`s:
-    /// - `Text` for assistant text chunks
-    /// - `ToolCall` / `ToolResult` for tool lifecycle (visualization + harness)
+    /// Stream one chat turn. The caller has already reconstructed the history
+    /// (including past tool calls + results) and supplies the immediate
+    /// `prompt` (either real user text or a synthesized continuation marker
+    /// after a tool response). Returns a stream of `ChatEvent`s.
     pub async fn stream(
         &self,
         turn: ChatTurn,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>> {
-        let (system_prompt, history, prompt) = split_history(&turn.messages)?;
-        let mut preamble = system_prompt.unwrap_or_default();
+        let mut preamble = String::new();
         let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
 
-        // Side channel: every wrapped tool emits Call/Result events here.
-        // The unbounded channel avoids backpressure (tool calls aren't
-        // high-frequency, but blocking inside `Tool::call()` would deadlock
-        // the agent stream).
+        // The harness preamble is always present — it explains the
+        // `awaiting_user_input` marker to the model.
+        push_preamble(&mut preamble, CONFIRMATION_PREAMBLE);
+
         let (tool_tx, tool_rx) = tokio::sync::mpsc::unbounded_channel::<ToolEvent>();
 
-        self.add_calendar_tools(
-            &mut preamble,
-            &mut tools,
-            &turn.locale,
-            &turn.tool_auth,
-            &tool_tx,
-        );
+        self.add_calendar_tools(&mut preamble, &mut tools, &turn.locale, &turn.tool_auth, &tool_tx);
         self.add_travel_tools(&mut preamble, &mut tools, &turn.tool_auth, &tool_tx);
 
         let mut builder = self.gemini.agent(&self.model);
@@ -97,11 +80,9 @@ impl LlmClient {
         }
 
         let agent = builder.default_max_turns(10).tools(tools).build();
-        let stream = agent.stream_chat(prompt, history).await;
+        let stream = agent.stream_chat(turn.prompt, turn.history).await;
 
-        // Map rig items to ChatEvent — text only; all tool events come via
-        // the side channel (the wrappers emit them with our own call_ids
-        // that the frontend uses to correlate confirmations).
+        // Forward rig text events; tool events arrive via the side channel.
         let rig_mapped = stream.filter_map(|item| async move {
             match item {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
@@ -112,9 +93,6 @@ impl LlmClient {
             }
         });
 
-        // Merge: text from rig, tool events from the side channel. Drop tool
-        // events that arrive after the rig stream ends (they're for an
-        // already-completed turn).
         let tool_stream = UnboundedReceiverStream::new(tool_rx)
             .map(|ev| Ok::<ChatEvent, anyhow::Error>(ChatEvent::from(ev)));
         let merged = stream::select(rig_mapped, tool_stream);
@@ -134,7 +112,6 @@ impl LlmClient {
         };
         push_preamble(preamble, &build_calendar_preamble(locale));
         push_preamble(preamble, GMAIL_PREAMBLE);
-        let registry = self.confirmation_registry.clone();
 
         // Read tools.
         tools.push(Box::new(ToolWrapper::new_read(
@@ -154,36 +131,30 @@ impl LlmClient {
             tool_tx.clone(),
         )));
 
-        // Write tools — gated behind user confirmation.
+        // Write tools — emit only; execution is deferred to /chat/tool-responses.
         tools.push(Box::new(ToolWrapper::new_write(
             CreateCalendarEventTool::new(token.clone()),
             tool_tx.clone(),
-            registry.clone(),
         )));
         tools.push(Box::new(ToolWrapper::new_write(
             UpdateCalendarEventTool::new(token.clone()),
             tool_tx.clone(),
-            registry.clone(),
         )));
         tools.push(Box::new(ToolWrapper::new_write(
             DeleteCalendarEventTool::new(token.clone()),
             tool_tx.clone(),
-            registry.clone(),
         )));
         tools.push(Box::new(ToolWrapper::new_write(
             RespondToEventTool::new(token.clone()),
             tool_tx.clone(),
-            registry.clone(),
         )));
         tools.push(Box::new(ToolWrapper::new_write(
             SendEmailTool::new(token.clone()),
             tool_tx.clone(),
-            registry.clone(),
         )));
         tools.push(Box::new(ToolWrapper::new_write(
             ReplyToEmailTool::new(token),
             tool_tx.clone(),
-            registry,
         )));
     }
 
@@ -203,7 +174,6 @@ impl LlmClient {
             tool_tx.clone(),
         )));
 
-        // Hotel booking additionally requires Stripe + a user-side payment method.
         if let (Some(stripe), Some(pm)) = (self.stripe.as_ref(), auth.stripe_payment.as_ref()) {
             let StripePaymentRefs {
                 customer_id,
@@ -219,7 +189,6 @@ impl LlmClient {
                     self.db_pool.clone(),
                 ),
                 tool_tx.clone(),
-                self.confirmation_registry.clone(),
             )));
         }
     }
@@ -241,55 +210,4 @@ fn build_calendar_preamble(locale: &LocaleContext) -> String {
         _ => "unknown".to_string(),
     };
     CALENDAR_PREAMBLE_TEMPLATE.replace("{{CURRENT_DATETIME}}", &datetime_context)
-}
-
-/// Splits `[system?, user, assistant, user, ..., user]` into:
-/// - the system prompt (optional)
-/// - the chat history (everything except the last message), as rig `Message`s
-/// - the final user prompt
-///
-/// `Role::Tool` rows are filtered out (rig handles tool calls within a single
-/// agent loop; replaying historical tool calls isn't needed and would require
-/// non-trivial mapping back to rig's `ToolResult` message shape).
-fn split_history(messages: &[ChatMessage]) -> Result<(Option<String>, Vec<Message>, String)> {
-    if messages.is_empty() {
-        return Err(anyhow!("messages array is empty"));
-    }
-
-    let mut system_prompt: Option<String> = None;
-    let mut rest: Vec<&ChatMessage> = Vec::with_capacity(messages.len());
-
-    for m in messages {
-        match m.role {
-            Role::System => {
-                system_prompt = Some(match system_prompt {
-                    Some(s) => format!("{s}\n\n{}", m.content),
-                    None => m.content.clone(),
-                });
-            }
-            Role::Tool => continue,
-            _ => rest.push(m),
-        }
-    }
-
-    let last = rest
-        .last()
-        .ok_or_else(|| anyhow!("no user/assistant messages provided"))?;
-    if !matches!(last.role, Role::User) {
-        return Err(anyhow!("the final message must be a user message"));
-    }
-    let prompt = last.content.clone();
-
-    let history: Vec<Message> = rest[..rest.len() - 1]
-        .iter()
-        .map(|m| match m.role {
-            Role::User => Message::user(m.content.clone()),
-            Role::Assistant => Message::assistant(m.content.clone()),
-            Role::System | Role::Tool => {
-                unreachable!("system/tool messages filtered above")
-            }
-        })
-        .collect();
-
-    Ok((system_prompt, history, prompt))
 }

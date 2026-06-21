@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use diesel::{
-    ExpressionMethods, Insertable, OptionalExtension, QueryDsl, Queryable, Selectable,
-    SelectableHelper,
+    ExpressionMethods, Insertable, JoinOnDsl, NullableExpressionMethods, OptionalExtension,
+    QueryDsl, Queryable, Selectable, SelectableHelper,
 };
 use diesel_async::RunQueryDsl;
 use serde::{Deserialize, Serialize};
@@ -307,6 +307,10 @@ fn generate_title(content: &str) -> String {
 
 /// Serialised JSON payload stored in `messages.content` for tool rows. The
 /// shape is shared with the frontend (`src/lib/types.ts ToolCallEntry`).
+///
+/// `output` carries the full successful tool output JSON when available, so
+/// we can faithfully replay history into rig as `ToolResult` content. For
+/// rejected / errored calls, only `summary` is populated.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolMessageContent {
     pub args: serde_json::Value,
@@ -316,6 +320,61 @@ pub struct ToolMessageContent {
     pub summary: Option<String>,
     #[serde(default)]
     pub success: Option<bool>,
+    /// The raw `T::Output` JSON for successful executions. Used when
+    /// reconstructing tool history into rig `Message::tool_result`.
+    #[serde(default)]
+    pub output: Option<serde_json::Value>,
+}
+
+/// Look up a still-pending tool call by `tool_call_id`, ensuring the
+/// conversation it lives in belongs to `user_id`. Returns `None` if the
+/// call doesn't exist, isn't owned by the user, or has already been
+/// resolved (status != 'pending_user').
+pub struct PendingToolCall {
+    pub conversation_id: Uuid,
+    pub tool_name: String,
+    pub args: serde_json::Value,
+}
+
+#[instrument(skip(pool))]
+pub async fn find_pending_tool_for_user(
+    pool: &DbPool,
+    user_id: Uuid,
+    call_id: &str,
+) -> Result<Option<PendingToolCall>> {
+    let mut conn = pool.get().await.context("Failed to get DB connection")?;
+    let row: Option<(Uuid, String, String)> = messages::table
+        .inner_join(conversations::table.on(conversations::id.eq(messages::conversation_id)))
+        .filter(messages::tool_call_id.eq(call_id))
+        .filter(messages::role.eq("tool"))
+        .filter(conversations::user_id.eq(user_id))
+        .filter(conversations::deleted_at.is_null())
+        .select((
+            messages::conversation_id,
+            messages::content,
+            messages::tool_name.assume_not_null(),
+        ))
+        .first(&mut conn)
+        .await
+        .optional()
+        .context("Failed to look up pending tool call")?;
+
+    let Some((conversation_id, content, tool_name)) = row else {
+        return Ok(None);
+    };
+
+    let payload: ToolMessageContent = match serde_json::from_str(&content) {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+    if payload.status != "pending_user" {
+        return Ok(None);
+    }
+    Ok(Some(PendingToolCall {
+        conversation_id,
+        tool_name,
+        args: payload.args,
+    }))
 }
 
 /// Insert (or update) a tool row keyed by `tool_call_id`. The first call
