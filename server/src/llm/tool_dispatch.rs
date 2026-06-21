@@ -6,6 +6,12 @@
 //! `/chat/tool-responses`. That endpoint calls into this module to do the
 //! deferred work, then resumes the conversation with the real result in
 //! history.
+//!
+//! ⚠️ **Keep this in sync with the write tools registered with the agent in
+//! `LlmClient::add_*_tools`.** If a write tool is added there but not here,
+//! the user will see the confirmation card but clicking Approve will fail
+//! with "unknown write tool". The same applies to `friendly_action` in
+//! `api::tool_responses` — every write tool needs an entry there too.
 
 use anyhow::{anyhow, Result};
 use rig::tool::Tool;
@@ -18,6 +24,10 @@ use crate::llm::context::{StripePaymentRefs, ToolAuth};
 use crate::tools::gmail::{ReplyToEmailTool, SendEmailTool};
 use crate::tools::google_calendar::{
     CreateCalendarEventTool, DeleteCalendarEventTool, RespondToEventTool, UpdateCalendarEventTool,
+};
+use crate::tools::outlook::{
+    CreateOutlookEventTool, DeleteOutlookEventTool, ReplyOutlookEmailTool, RespondOutlookEventTool,
+    SendOutlookEmailTool, UpdateOutlookEventTool,
 };
 use crate::tools::travelport::HotelBookTool;
 
@@ -40,6 +50,7 @@ pub async fn execute_pending(
     args_json: &serde_json::Value,
 ) -> Result<ExecOutcome> {
     match tool_name {
+        // ── Gmail ───────────────────────────────────────────────────────────
         "send_email" => {
             let token = require_google(tool_auth)?;
             let tool = SendEmailTool::new(token);
@@ -50,6 +61,7 @@ pub async fn execute_pending(
             let tool = ReplyToEmailTool::new(token);
             run(&tool, args_json).await
         }
+        // ── Google Calendar ─────────────────────────────────────────────────
         "create_calendar_event" => {
             let token = require_google(tool_auth)?;
             let tool = CreateCalendarEventTool::new(token);
@@ -70,6 +82,38 @@ pub async fn execute_pending(
             let tool = RespondToEventTool::new(token);
             run(&tool, args_json).await
         }
+        // ── Outlook ─────────────────────────────────────────────────────────
+        "send_outlook_email" => {
+            let token = require_outlook(tool_auth)?;
+            let tool = SendOutlookEmailTool::new(token);
+            run(&tool, args_json).await
+        }
+        "reply_outlook_email" => {
+            let token = require_outlook(tool_auth)?;
+            let tool = ReplyOutlookEmailTool::new(token);
+            run(&tool, args_json).await
+        }
+        "create_outlook_event" => {
+            let token = require_outlook(tool_auth)?;
+            let tool = CreateOutlookEventTool::new(token);
+            run(&tool, args_json).await
+        }
+        "update_outlook_event" => {
+            let token = require_outlook(tool_auth)?;
+            let tool = UpdateOutlookEventTool::new(token);
+            run(&tool, args_json).await
+        }
+        "delete_outlook_event" => {
+            let token = require_outlook(tool_auth)?;
+            let tool = DeleteOutlookEventTool::new(token);
+            run(&tool, args_json).await
+        }
+        "respond_outlook_event" => {
+            let token = require_outlook(tool_auth)?;
+            let tool = RespondOutlookEventTool::new(token);
+            run(&tool, args_json).await
+        }
+        // ── Travelport ──────────────────────────────────────────────────────
         "hotel_book" => {
             let stripe: &StripeConfig = config
                 .stripe
@@ -102,6 +146,13 @@ fn require_google(tool_auth: &ToolAuth) -> Result<String> {
         .google_access_token
         .clone()
         .ok_or_else(|| anyhow!("Google access token unavailable"))
+}
+
+fn require_outlook(tool_auth: &ToolAuth) -> Result<String> {
+    tool_auth
+        .outlook_access_token
+        .clone()
+        .ok_or_else(|| anyhow!("Outlook access token unavailable"))
 }
 
 /// Generic helper that decodes the stored args JSON into the tool's typed

@@ -106,6 +106,12 @@ impl LlmClient {
         Ok(Box::pin(merged))
     }
 
+    // ⚠️ When adding a new write tool to any `add_*_tools` method below, you
+    // MUST also add it to:
+    //   1. `llm::tool_dispatch::execute_pending` (so user approval executes it)
+    //   2. `api::tool_responses::friendly_action` (so prompts read naturally)
+    // Forgetting any of these results in a silent failure on user approval.
+
     fn add_calendar_tools(
         &self,
         preamble: &mut String,

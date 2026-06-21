@@ -175,14 +175,27 @@ pub async fn tool_response_handler(
 /// synthesised continuation prompts so the model talks about "sending
 /// the email" instead of echoing the raw `send_email` identifier at the
 /// user.
+///
+/// ⚠️ Keep this in sync with the write tools in `llm::client::add_*_tools`
+/// and `llm::tool_dispatch::execute_pending`.
 fn friendly_action(tool_name: &str) -> &'static str {
     match tool_name {
+        // Gmail
         "send_email" => "sending the email",
         "reply_to_email" => "replying to the email",
+        // Google Calendar
         "create_calendar_event" => "creating the calendar event",
         "update_calendar_event" => "updating the calendar event",
         "delete_calendar_event" => "deleting the calendar event",
         "respond_to_event" => "responding to the calendar invitation",
+        // Outlook
+        "send_outlook_email" => "sending the Outlook email",
+        "reply_outlook_email" => "replying to the Outlook email",
+        "create_outlook_event" => "creating the Outlook calendar event",
+        "update_outlook_event" => "updating the Outlook calendar event",
+        "delete_outlook_event" => "deleting the Outlook calendar event",
+        "respond_outlook_event" => "responding to the Outlook calendar invitation",
+        // Travelport
         "hotel_book" => "booking the hotel",
         _ => "the requested action",
     }

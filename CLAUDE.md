@@ -4,7 +4,7 @@
 
 Silvie is an AI-powered personal assistant for executives on the road. It acts as a unified command center for trips, meetings, bookings, receipts, and follow-ups — think "AI Chief of Staff for business travel and executive logistics." See `README.md` for the full product vision.
 
-**Current state.** Core foundation is in place: Auth0 sign-in / sign-up, Postgres-backed user/profile/payment/integration data, streaming chat with tool-using LLM agent (Gemini + `rig`), Google integration (Gmail + Calendar) via OAuth, Stripe-based payment-method storage with Issuing virtual cards for bookings, and a Travelport hotel-booking tool. The UI surfaces conversations, a connectors page, and a user-profile panel.
+**Current state.** Core foundation is in place: Auth0 sign-in / sign-up, Postgres-backed user/profile/payment/integration data, streaming chat with tool-using LLM agent (Gemini + `rig`), Google integration (Gmail + Calendar) via OAuth, Microsoft Outlook integration (Mail + Calendar) via OAuth — mutually exclusive with Google so only one mail/calendar provider is connected at a time, Stripe-based payment-method storage with Issuing virtual cards for bookings, and a Travelport hotel-booking tool. The UI surfaces conversations, a connectors page, and a user-profile panel.
 
 ## Tech stack
 
@@ -52,7 +52,8 @@ silvie/
 │   │   │   └── types.rs        # AuthUser, TokenSet, StoredAuthCredentials
 │   │   └── integrations/       # Third-party OAuth handshakes
 │   │       ├── mod.rs          # Shared OAuthTokens type
-│   │       └── google.rs       # Unified Google (Gmail + Calendar) OAuth flow
+│   │       ├── google.rs       # Unified Google (Gmail + Calendar) OAuth flow
+│   │       └── outlook.rs      # Microsoft Outlook (Mail + Calendar) OAuth flow
 │   └── tauri.conf.json
 ├── server/                     # Standalone Rust HTTP backend
 │   ├── src/
@@ -73,15 +74,20 @@ silvie/
 │   │   │   ├── integrations.rs, conversations.rs
 │   │   ├── api/                # poem handlers — thin wrappers over repos + services
 │   │   │   ├── users.rs, user_info.rs, payments.rs,
-│   │   │   ├── integrations.rs, conversations.rs, chat.rs
+│   │   │   ├── integrations.rs, conversations.rs, chat.rs,
+│   │   │   ├── tool_responses.rs  # POST /chat/tool-responses — runs an approved write tool
 │   │   ├── services/           # External HTTP clients (no DB)
 │   │   │   └── stripe.rs       # PaymentClient (SetupIntent, Issuing cards)
 │   │   ├── llm/                # Gemini + rig glue
 │   │   │   ├── client.rs       # LlmClient::stream — builds agent + tools per turn
-│   │   │   └── context.rs      # ChatTurn, LocaleContext, ToolAuth, StripePaymentRefs
+│   │   │   ├── context.rs      # ChatTurn, LocaleContext, ToolAuth, StripePaymentRefs
+│   │   │   ├── harness.rs      # ToolWrapper — read/write gating + tool-event emission
+│   │   │   ├── history.rs      # DB rows → rig message history reconstruction
+│   │   │   └── tool_dispatch.rs # execute_pending — deferred write-tool execution after approval
 │   │   └── tools/              # LLM tools (rig::tool::Tool impls)
 │   │       ├── gmail/             # get/list/reply/send emails
 │   │       ├── google_calendar/   # create/update/delete/list/respond_event, find_free_time
+│   │       ├── outlook/           # Microsoft Graph: mail + calendar (mirrors gmail + google_calendar)
 │   │       └── travelport/        # hotel_search, hotel_book (+ shared auth)
 │   ├── prompts/                # Tool descriptions (`include_str!`'d into tool defs)
 │   ├── migrations/             # diesel-managed SQL
@@ -102,7 +108,7 @@ docker compose up -d postgres
 # ── Terminal 2: backend ──────────────────────────────────────────────────────
 # First time only:  cp server/.env.example server/.env  (fill GEMINI_API_KEY,
 # AUTH0_DOMAIN, AUTH0_AUDIENCE, DATABASE_URL, and optionally STRIPE_/TRAVELPORT_/
-# GOOGLE_CLIENT_*). Then:
+# GOOGLE_CLIENT_*/OUTLOOK_CLIENT_ID). Then:
 cd server && cargo run                # listens on http://127.0.0.1:8080
 # or fully containerised (still needs root .env for GEMINI_API_KEY):
 docker compose up --build
@@ -134,6 +140,7 @@ The frontend talks to the backend at `http://localhost:8080` by default. Overrid
 - Postgres (host): `localhost:12345`, db `silvie`, user `root`, password `test`
 - Auth0 loopback callback port: `1421` (registered in Auth0 client)
 - Google OAuth loopback callback port: `1422` (must be registered in Google Cloud Console as `http://127.0.0.1:1422`)
+- Outlook OAuth loopback callback port: `1423` (must be registered in the Azure app registration under "Mobile and desktop applications" as `http://127.0.0.1:1423`)
 - Frontend output dir (for Tauri): `../build` (via `@sveltejs/adapter-static`)
 - App identifier: `com.silvie`
 
@@ -158,13 +165,31 @@ The backend has a three-layer split. Keep new code on the right side of these li
 
 ### Adding a third-party integration on the desktop side
 
-`src-tauri/src/integrations/` is set up to grow. To add a new provider (e.g. Outlook):
+`src-tauri/src/integrations/` houses one file per provider — see `google.rs` (confidential client with secret) and `outlook.rs` (public client, PKCE-only, no secret) as the two reference patterns. To add a new provider:
 
-1. Create `integrations/<provider>.rs` with a `run()` function that returns `super::OAuthTokens`. Model it on `google.rs` — fixed loopback port, PKCE, system-browser open, captured redirect via `tauri_plugin_oauth`.
+1. Create `integrations/<provider>.rs` with a `run()` function that returns `super::OAuthTokens`. Pick a unique fixed loopback port (1422 = Google, 1423 = Outlook) and register `http://127.0.0.1:<port>` with the provider's developer console as the redirect URI. PKCE is mandatory; `client_secret` is only needed if the provider treats this as a confidential client.
 2. Register the module in `integrations/mod.rs`.
-3. Add a `#[tauri::command]` wrapper in `src-tauri/src/lib.rs` and register it in the `invoke_handler!`.
-4. On the backend, extend `repos::integrations::fresh_access_token` with the provider's refresh logic and add a slug constant.
-5. Add the provider to the frontend `PROVIDERS` list in `src/lib/data/connectors.ts` and surface a connect/disconnect button in `src/lib/stores/connectors.svelte.ts`.
+3. Add a `#[tauri::command]` wrapper in `src-tauri/src/lib.rs` and register it in the `invoke_handler!`. Manage the per-provider config state in the builder.
+4. Extend `src-tauri/src/config.rs` (Tauri side) and `server/src/config.rs` (server side) with the new env vars. Both default to `None` when unset.
+5. In `server/src/repos/integrations.rs`: add a `<PROVIDER>: &str = "..."` slug constant, an `ensure_<provider>` check on `IntegrationsConfig`, a `refresh_<provider>_token` function, and a new arm in the `fresh_access_token` match.
+6. Populate the new token field on `ToolAuth` in `server/src/api/chat.rs::build_tool_auth` so LLM tools can use it.
+7. Frontend: add the provider to `PROVIDERS` in `src/lib/data/connectors.ts` (with a `group` if it should be mutually exclusive with another provider, e.g. mail/calendar providers share `group: 'mail'`), add a `start<Provider>OAuth()` helper in `src/lib/services/connectors.ts`, and add `connect<Provider>`/`disconnect<Provider>` methods to the store in `src/lib/stores/connectors.svelte.ts`. Wire the card in `src/routes/connectors/+page.svelte`.
+
+### Adding an LLM tool
+
+Tools live under `server/src/tools/<provider>/`. Each tool is a `rig::tool::Tool` impl with a JSON-schema `definition()` and an async `call()`. The description text is held in `server/prompts/<provider>/<tool>.md` and `include_str!`'d into the definition.
+
+Tools are split into **read** (executed inline during the chat stream) and **write** (deferred — only emitted as a confirmation card during the stream, then actually executed via `POST /chat/tool-responses` after the user clicks Approve in the UI).
+
+**Read tools** — register in the relevant `add_*_tools` method of `LlmClient` via `ToolWrapper::new_read(...)`. That's it.
+
+**Write tools** — ⚠️ must be registered in **three places**; forgetting any of them causes a silent failure on user approval:
+
+1. `LlmClient::add_*_tools` (in `server/src/llm/client.rs`) — wrap in `ToolWrapper::new_write(...)` so the LLM sees it during the stream and the harness defers execution.
+2. `tool_dispatch::execute_pending` (in `server/src/llm/tool_dispatch.rs`) — add a match arm that builds the tool fresh from `ToolAuth` and calls `run(&tool, args_json)`. Without this, clicking Approve returns "unknown write tool".
+3. `friendly_action` (in `server/src/api/tool_responses.rs`) — add a match arm returning a human-readable action phrase (e.g. `"sending the email"`). Without this, the LLM continuation prompt uses the literal tool name.
+
+All three sites carry a sync-warning comment. We considered a closure registry to collapse this to one place but reverted — the dual-list problem still existed in the registry version (write tools have to live in both the agent and the dispatch path), so the explicit match is simpler. Revisit only if the lists grow large enough that scanning them becomes painful, in which case the right fix is to make `ToolWrapper` hold `Arc<T>` so a single source of truth can hand the same instance to both the agent and the executor.
 
 ### Frontend conventions
 
@@ -220,7 +245,7 @@ Reference implementations: `src-tauri/src/integrations/google.rs` and `src-tauri
   - **Postgres encryption-at-rest** in production (RDS / Cloud SQL / Aurora — enabled by default on managed offerings).
   - **TLS in transit** between client ↔ server ↔ database.
   - **OS keychain** for any secrets the desktop client must hold (Auth0 access + refresh tokens).
-- Provider OAuth tokens (Google access + refresh) are stored in the backend `integrations` table — **not** on the desktop. The Tauri side returns the initial tokens from the OAuth handshake and forgets them.
+- Provider OAuth tokens (Google and Microsoft access + refresh) are stored in the backend `integrations` table — **not** on the desktop. The Tauri side returns the initial tokens from the OAuth handshake and forgets them.
 - Stripe Issuing PAN/CVV: lives in memory only for the duration of a booking request — never logged or persisted.
 - Revisit only if compliance requirements appear (e.g., a customer contractually requires application-level encryption) or we add a new category of secret materially more sensitive.
 
