@@ -4,16 +4,23 @@
   let {
     value = $bindable(''),
     onSend,
+    onCancel,
     disabled = false,
   }: {
     value?: string;
     onSend: () => void;
-    /** Hard-blocks send (button + Enter) while a stream is in flight on the
-     *  current conversation. The textarea stays editable so the user can
-     *  draft the next message; submission unlocks the moment the stream
-     *  ends. */
+    /** Optional cancel handler. When provided and `disabled` is true, the
+     *  send button slot flips to a stop button — clicking it aborts the
+     *  in-flight stream. */
+    onCancel?: () => void;
+    /** Hard-blocks send (button + Enter) while a stream is in flight on
+     *  the current conversation. The textarea stays editable so the user
+     *  can draft the next message; submission unlocks the moment the
+     *  stream ends. */
     disabled?: boolean;
   } = $props();
+
+  const showCancel = $derived(disabled && Boolean(onCancel));
 
   let textarea = $state<HTMLTextAreaElement | undefined>(undefined);
 
@@ -51,16 +58,28 @@
       rows="1"
       class="input"
     ></textarea>
-    <button
-      class="send-btn"
-      onclick={onSend}
-      disabled={disabled || !value.trim()}
-      aria-label={disabled ? 'Waiting for the assistant to finish' : 'Send'}
-    >
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-      </svg>
-    </button>
+    {#if showCancel}
+      <button
+        class="send-btn cancel"
+        onclick={onCancel}
+        aria-label="Stop generating"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+        </svg>
+      </button>
+    {:else}
+      <button
+        class="send-btn"
+        onclick={onSend}
+        disabled={disabled || !value.trim()}
+        aria-label={disabled ? 'Waiting for the assistant to finish' : 'Send'}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+        </svg>
+      </button>
+    {/if}
   </div>
 
   <p class="disclaimer">Silvie can make mistakes. Verify important travel details.</p>
@@ -162,6 +181,15 @@
 
   .send-btn:not(:disabled):hover {
     background: var(--purple-800);
+  }
+
+  .send-btn.cancel {
+    background: var(--text-primary);
+    color: var(--bg);
+    opacity: 1;
+  }
+  .send-btn.cancel:hover {
+    background: var(--text-secondary);
   }
 
   .disclaimer {

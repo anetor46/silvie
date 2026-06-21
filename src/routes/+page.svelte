@@ -162,6 +162,16 @@
   function handleSuggestion(text: string) {
     inputValue = text;
   }
+
+  /** Abort the current SSE stream. The fetch's AbortController fires, the
+   *  reader stops, and the `.finally()` block clears the streaming flag so
+   *  the input bar unlocks. Note: the backend's spawn task keeps running
+   *  to completion — it persists the assistant message to the DB even
+   *  after the client disconnects. Truly stopping the model would need
+   *  backend cancellation plumbing. */
+  function cancelStream() {
+    currentStream?.cancel();
+  }
 </script>
 
 <main class="chat-area" bind:this={messagesEl}>
@@ -175,6 +185,7 @@
 <InputBar
   bind:value={inputValue}
   onSend={sendMessage}
+  onCancel={cancelStream}
   disabled={conversations.isStreaming}
 />
 
