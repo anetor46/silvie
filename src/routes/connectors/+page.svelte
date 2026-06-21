@@ -25,6 +25,15 @@
           onConnect={() => connectors.connectGoogle()}
           onDisconnect={() => connectors.disconnectGoogle()}
         />
+      {:else if provider.id === 'outlook'}
+        <ConnectorCard
+          {provider}
+          connectedEmail={connectors.outlook?.provider_account_email ?? null}
+          loading={connectors.outlookLoading}
+          error={connectors.outlookError}
+          onConnect={() => connectors.connectOutlook()}
+          onDisconnect={() => connectors.disconnectOutlook()}
+        />
       {:else}
         <ConnectorCard {provider} />
       {/if}

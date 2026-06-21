@@ -30,7 +30,7 @@ use crate::{
     },
     repos::{
         conversations::{self, ToolMessageContent},
-        integrations::{self, IntegrationsConfig, GOOGLE_PROVIDER},
+        integrations::{self, IntegrationsConfig, GOOGLE_PROVIDER, OUTLOOK_PROVIDER},
         payments,
     },
     types::{ChatEvent, ChatRequest, SseEvent},
@@ -348,6 +348,14 @@ pub async fn build_tool_auth(
             .flatten()
             .map(|t| t.access_token);
 
+    let outlook_access_token =
+        integrations::fresh_access_token(pool, integ_cfg, user_id, OUTLOOK_PROVIDER)
+            .await
+            .inspect_err(|e| error!("failed to fetch Outlook access token: {e:#}"))
+            .ok()
+            .flatten()
+            .map(|t| t.access_token);
+
     let stripe_payment = payments::fetch_payment_method(pool, user_id)
         .await
         .ok()
@@ -359,6 +367,7 @@ pub async fn build_tool_auth(
 
     ToolAuth {
         google_access_token,
+        outlook_access_token,
         stripe_payment,
     }
 }
@@ -386,13 +395,10 @@ pub async fn update_tool_status_in_db(
         .await
         .optional()?;
 
-    let (content, tool_name) = match existing {
-        Some(v) => v,
-        None => (
-            "{}".to_string(),
-            Some("unknown".to_string()),
-        ),
-    };
+    let (content, tool_name) = existing.unwrap_or_else(|| (
+        "{}".to_string(),
+        Some("unknown".to_string()),
+    ));
 
     let mut payload: ToolMessageContent =
         serde_json::from_str(&content).unwrap_or(ToolMessageContent {

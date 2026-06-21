@@ -24,7 +24,7 @@ pub enum ApiError {
     /// carries the public message (e.g. "Stripe is not configured").
     #[error("{0}")]
     Unavailable(String),
-    /// 500 — anything not categorised above. Server logs the chain at
+    /// 500 — anything not categorized above. Server logs the chain at
     /// `error!`; the client only sees a generic status.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),

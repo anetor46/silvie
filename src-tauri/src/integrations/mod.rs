@@ -8,6 +8,7 @@
 //! shape as `google.rs`, then registering a Tauri command in `lib.rs`.
 
 pub mod google;
+pub mod outlook;
 
 use serde::{Deserialize, Serialize};
 

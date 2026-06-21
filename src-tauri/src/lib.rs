@@ -7,7 +7,7 @@ use integrations::OAuthTokens;
 use tauri::State;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use crate::config::{Auth0Config, Config, GoogleOAuthConfig};
+use crate::config::{Auth0Config, Config, GoogleOAuthConfig, OutlookOAuthConfig};
 
 #[tauri::command]
 async fn start_google_oauth(
@@ -15,6 +15,16 @@ async fn start_google_oauth(
     config: State<'_, GoogleOAuthConfig>,
 ) -> Result<OAuthTokens, String> {
     integrations::google::run(&app, &config.client_id, &config.client_secret)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn start_outlook_oauth(
+    app: tauri::AppHandle,
+    config: State<'_, OutlookOAuthConfig>,
+) -> Result<OAuthTokens, String> {
+    integrations::outlook::run(&app, &config.client_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -104,6 +114,7 @@ pub fn run() {
                 connection: std::env::var("AUTH0_CONNECTION").unwrap_or_default(),
             },
             google_oauth: None,
+            outlook_oauth: None,
         }
     });
 
@@ -112,13 +123,22 @@ pub fn run() {
         client_secret: String::new(),
     });
 
+    let outlook_oauth = config
+        .outlook_oauth
+        .clone()
+        .unwrap_or(OutlookOAuthConfig {
+            client_id: String::new(),
+        });
+
     tauri::Builder::default()
         .manage(config.auth0)
         .manage(google_oauth)
+        .manage(outlook_oauth)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_oauth::init())
         .invoke_handler(tauri::generate_handler![
             start_google_oauth,
+            start_outlook_oauth,
             auth0_login,
             auth0_signup,
             auth0_request_password_reset,

@@ -19,6 +19,7 @@ pub struct Config {
     pub gemini_api_key: String,
     pub auth0: Auth0Config,
     pub google_oauth: Option<GoogleOAuthCredentials>,
+    pub outlook_oauth: Option<OutlookOAuthCredentials>,
     pub stripe: Option<StripeConfig>,
     pub travelport: Option<TravelportCredentials>,
 }
@@ -33,6 +34,11 @@ pub struct Auth0Config {
 pub struct GoogleOAuthCredentials {
     pub client_id: String,
     pub client_secret: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OutlookOAuthCredentials {
+    pub client_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +68,8 @@ impl Config {
                     client_secret,
                 },
             ),
+            outlook_oauth: optional("OUTLOOK_CLIENT_ID")
+                .map(|client_id| OutlookOAuthCredentials { client_id }),
             stripe: optional("STRIPE_SECRET_KEY").map(|secret_key| StripeConfig { secret_key }),
             travelport: optional_pair("TRAVELPORT_CLIENT_ID", "TRAVELPORT_CLIENT_SECRET").map(
                 |(client_id, client_secret)| TravelportCredentials {

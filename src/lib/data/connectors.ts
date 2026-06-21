@@ -6,6 +6,8 @@ export interface Provider {
   color: string;
   textColor?: string;
   requiresOAuth?: boolean;
+  /** Providers in the same group are mutually exclusive — connecting one auto-disconnects the others. */
+  group?: string;
 }
 
 export const PROVIDERS: Provider[] = [
@@ -16,6 +18,7 @@ export const PROVIDERS: Provider[] = [
     color: '#4285F4',
     textColor: '#ffffff',
     requiresOAuth: true,
+    group: 'mail',
   },
   {
     id: 'outlook',
@@ -23,5 +26,7 @@ export const PROVIDERS: Provider[] = [
     features: ['Mail', 'Calendar'],
     color: '#0078D4',
     textColor: '#ffffff',
+    requiresOAuth: true,
+    group: 'mail',
   },
 ];

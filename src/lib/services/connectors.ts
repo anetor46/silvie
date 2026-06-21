@@ -143,3 +143,13 @@ export async function getGoogleAccessToken(): Promise<string | null> {
   if (!isTauri()) return null;
   return getProviderAccessToken(GOOGLE_PROVIDER);
 }
+
+// ── Convenience: Microsoft Outlook (Mail + Calendar) ────────────────────────
+
+export const OUTLOOK_PROVIDER = 'outlook';
+
+/** Run the Microsoft OAuth flow in the browser; resolves with the tokens. */
+export async function startOutlookOAuth(): Promise<OAuthTokens> {
+  assertTauri();
+  return await invoke<OAuthTokens>('start_outlook_oauth');
+}

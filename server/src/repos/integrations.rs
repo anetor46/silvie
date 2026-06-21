@@ -21,14 +21,16 @@ use uuid::Uuid;
 use crate::{db::DbPool, schema::integrations};
 
 /// Provider slug for the unified Google integration (Gmail + Calendar).
-/// Kept here so other modules don't hard-code it.
 pub const GOOGLE_PROVIDER: &str = "google";
 
+/// Provider slug for the unified Microsoft Outlook integration (Mail + Calendar).
+pub const OUTLOOK_PROVIDER: &str = "outlook";
+
 /// Runtime credentials needed to refresh OAuth tokens for each provider.
-/// Today only Google is wired up; new providers add fields here.
 pub struct IntegrationsConfig {
     pub google_client_id: String,
     pub google_client_secret: String,
+    pub outlook_client_id: String,
 }
 
 impl IntegrationsConfig {
@@ -40,20 +42,33 @@ impl IntegrationsConfig {
         }
         Ok(())
     }
+
+    fn ensure_outlook(&self) -> Result<()> {
+        if self.outlook_client_id.is_empty() {
+            return Err(anyhow!(
+                "Outlook OAuth refresh is not configured on the server (set OUTLOOK_CLIENT_ID)."
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl From<&crate::config::Config> for IntegrationsConfig {
     fn from(cfg: &crate::config::Config) -> Self {
-        // Empty strings = unset. `ensure_google` translates that into a
-        // clean per-request error rather than panicking at boot.
-        let (id, secret) = cfg
+        let (google_id, google_secret) = cfg
             .google_oauth
             .as_ref()
             .map(|g| (g.client_id.clone(), g.client_secret.clone()))
             .unwrap_or_default();
+        let outlook_id = cfg
+            .outlook_oauth
+            .as_ref()
+            .map(|o| o.client_id.clone())
+            .unwrap_or_default();
         Self {
-            google_client_id: id,
-            google_client_secret: secret,
+            google_client_id: google_id,
+            google_client_secret: google_secret,
+            outlook_client_id: outlook_id,
         }
     }
 }
@@ -326,6 +341,10 @@ pub async fn fresh_access_token(
             )
             .await?
         }
+        OUTLOOK_PROVIDER => {
+            cfg.ensure_outlook()?;
+            refresh_outlook_token(&cfg.outlook_client_id, refresh_token).await?
+        }
         _ => return Err(anyhow!("refresh not implemented for provider {provider}")),
     };
 
@@ -373,6 +392,49 @@ struct GoogleTokenResponse {
     refresh_token: Option<String>,
     #[serde(default)]
     expires_in: Option<i64>,
+}
+
+#[instrument(skip(client_id, refresh_token))]
+async fn refresh_outlook_token(
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<RefreshedTokens> {
+    // Public-client token refresh: no client_secret for PKCE desktop apps.
+    let http = reqwest::Client::new();
+    let resp = http
+        .post("https://login.microsoftonline.com/common/oauth2/v2.0/token")
+        .form(&[
+            ("client_id", client_id),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+            ("scope", "offline_access Mail.ReadWrite Mail.Send Calendars.ReadWrite User.Read"),
+        ])
+        .send()
+        .await
+        .context("Failed to call Microsoft token endpoint")?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        error!(%status, "Microsoft token refresh failed: {body}");
+        return Err(anyhow!("Microsoft token refresh failed: HTTP {status}"));
+    }
+
+    #[derive(Deserialize)]
+    struct MsTokenResponse {
+        access_token: String,
+        #[serde(default)]
+        refresh_token: Option<String>,
+        #[serde(default)]
+        expires_in: Option<i64>,
+    }
+
+    let parsed: MsTokenResponse = serde_json::from_str(&body)
+        .with_context(|| format!("Failed to parse Microsoft token response: {body}"))?;
+    Ok(RefreshedTokens {
+        access_token: parsed.access_token,
+        refresh_token: parsed.refresh_token,
+        expires_in: parsed.expires_in,
+    })
 }
 
 #[instrument(skip(client_id, client_secret, refresh_token))]

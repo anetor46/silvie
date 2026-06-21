@@ -18,6 +18,11 @@ use crate::tools::google_calendar::{
     CreateCalendarEventTool, DeleteCalendarEventTool, FindFreeTimeTool, GoogleCalendarTool,
     RespondToEventTool, UpdateCalendarEventTool,
 };
+use crate::tools::outlook::{
+    CreateOutlookEventTool, DeleteOutlookEventTool, FindOutlookFreeTimeTool, GetOutlookEmailTool,
+    ListOutlookEmailsTool, ListOutlookEventsTool, ReplyOutlookEmailTool, RespondOutlookEventTool,
+    SendOutlookEmailTool, UpdateOutlookEventTool,
+};
 use crate::tools::travelport::{HotelBookTool, HotelSearchTool};
 use crate::types::{ChatEvent, ToolEvent};
 
@@ -28,6 +33,7 @@ const DEFAULT_MODEL: &str = "gemini-3.1-flash-lite";
 
 const CALENDAR_PREAMBLE_TEMPLATE: &str = include_str!("../../prompts/google_calendar/preamble.md");
 const GMAIL_PREAMBLE: &str = include_str!("../../prompts/gmail/preamble.md");
+const OUTLOOK_PREAMBLE_TEMPLATE: &str = include_str!("../../prompts/outlook/preamble.md");
 const HOTEL_PREAMBLE: &str = include_str!("../../prompts/travelport/preamble.md");
 const CONFIRMATION_PREAMBLE: &str = include_str!("../../prompts/confirmation/preamble.md");
 
@@ -72,6 +78,7 @@ impl LlmClient {
         let (tool_tx, tool_rx) = tokio::sync::mpsc::unbounded_channel::<ToolEvent>();
 
         self.add_calendar_tools(&mut preamble, &mut tools, &turn.locale, &turn.tool_auth, &tool_tx);
+        self.add_outlook_tools(&mut preamble, &mut tools, &turn.locale, &turn.tool_auth, &tool_tx);
         self.add_travel_tools(&mut preamble, &mut tools, &turn.tool_auth, &tool_tx);
 
         let mut builder = self.gemini.agent(&self.model);
@@ -158,6 +165,64 @@ impl LlmClient {
         )));
     }
 
+    fn add_outlook_tools(
+        &self,
+        preamble: &mut String,
+        tools: &mut Vec<Box<dyn ToolDyn>>,
+        locale: &LocaleContext,
+        auth: &ToolAuth,
+        tool_tx: &tokio::sync::mpsc::UnboundedSender<ToolEvent>,
+    ) {
+        let Some(token) = auth.outlook_access_token.clone() else {
+            return;
+        };
+        push_preamble(preamble, &build_outlook_preamble(locale));
+
+        // Read tools.
+        tools.push(Box::new(ToolWrapper::new_read(
+            ListOutlookEmailsTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_read(
+            GetOutlookEmailTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_read(
+            ListOutlookEventsTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_read(
+            FindOutlookFreeTimeTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+
+        // Write tools — deferred to /chat/tool-responses.
+        tools.push(Box::new(ToolWrapper::new_write(
+            SendOutlookEmailTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_write(
+            ReplyOutlookEmailTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_write(
+            CreateOutlookEventTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_write(
+            UpdateOutlookEventTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_write(
+            DeleteOutlookEventTool::new(token.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_write(
+            RespondOutlookEventTool::new(token),
+            tool_tx.clone(),
+        )));
+    }
+
     fn add_travel_tools(
         &self,
         preamble: &mut String,
@@ -201,6 +266,15 @@ fn push_preamble(preamble: &mut String, addition: &str) {
         preamble.push_str("\n\n");
         preamble.push_str(addition);
     }
+}
+
+fn build_outlook_preamble(locale: &LocaleContext) -> String {
+    let datetime_context = match (locale.current_datetime.as_deref(), locale.timezone.as_deref()) {
+        (Some(dt), Some(tz)) => format!("{dt} ({tz})"),
+        (Some(dt), None) => dt.to_string(),
+        _ => "unknown".to_string(),
+    };
+    OUTLOOK_PREAMBLE_TEMPLATE.replace("{{CURRENT_DATETIME}}", &datetime_context)
 }
 
 fn build_calendar_preamble(locale: &LocaleContext) -> String {

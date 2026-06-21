@@ -30,6 +30,7 @@ pub struct LocaleContext {
 #[derive(Debug, Default, Clone)]
 pub struct ToolAuth {
     pub google_access_token: Option<String>,
+    pub outlook_access_token: Option<String>,
     pub stripe_payment: Option<StripePaymentRefs>,
 }
 

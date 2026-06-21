@@ -23,7 +23,7 @@ use crate::{
 
 /// Helper: extract `&PaymentClient` from the injected `Arc<Option<…>>` or
 /// produce a 503 with a clear message. Used by both Stripe-API endpoints.
-fn stripe_client<'a>(arc: &'a Arc<Option<PaymentClient>>) -> ApiResult<&'a PaymentClient> {
+fn stripe_client(arc: &Arc<Option<PaymentClient>>) -> ApiResult<&PaymentClient> {
     (**arc)
         .as_ref()
         .ok_or_else(|| ApiError::Unavailable("Stripe is not configured on the server.".into()))

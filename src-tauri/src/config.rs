@@ -8,6 +8,7 @@ use std::env;
 pub struct Config {
     pub auth0: Auth0Config,
     pub google_oauth: Option<GoogleOAuthConfig>,
+    pub outlook_oauth: Option<OutlookOAuthConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,11 @@ pub struct GoogleOAuthConfig {
     pub client_secret: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct OutlookOAuthConfig {
+    pub client_id: String,
+}
+
 impl Config {
     /// Load and validate all configuration from environment variables.
     /// Fails immediately and clearly if any required variable is missing.
@@ -59,6 +65,8 @@ impl Config {
                     client_secret,
                 },
             ),
+            outlook_oauth: optional("OUTLOOK_CLIENT_ID")
+                .map(|client_id| OutlookOAuthConfig { client_id }),
         })
     }
 }
