@@ -176,7 +176,10 @@ pub async fn google_oauth_flow(
     );
 
     info!("fetching userinfo");
-    let userinfo = fetch_userinfo(&access_token).await?;
+    let userinfo = fetch_userinfo(&access_token).await.map_err(|e| {
+        error!("userinfo fetch failed: {e:#}");
+        anyhow!("Failed to retrieve your Google account details. Please try again.")
+    })?;
     info!(email_len = userinfo.email.len(), "userinfo fetched");
 
     Ok(OAuthTokens {
@@ -191,17 +194,18 @@ pub async fn google_oauth_flow(
 
 #[instrument(skip(access_token))]
 async fn fetch_userinfo(access_token: &str) -> Result<GoogleUserInfo> {
+    const USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
+
     #[derive(Deserialize)]
     struct UserInfo {
-        /// Google's stable subject identifier.
         sub: String,
         email: String,
     }
 
-    debug!("GET https://www.googleapis.com/oauth2/v2/userinfo");
+    debug!("GET {USERINFO_URL}");
     let client = reqwest::Client::new();
     let response = client
-        .get("https://www.googleapis.com/oauth2/v2/userinfo")
+        .get(USERINFO_URL)
         .bearer_auth(access_token)
         .send()
         .await
@@ -214,12 +218,14 @@ async fn fetch_userinfo(access_token: &str) -> Result<GoogleUserInfo> {
         .context("Failed to read userinfo response body")?;
 
     if !status.is_success() {
-        error!("userinfo body (error {status}): {body}");
-        return Err(anyhow!("userinfo returned HTTP {status}: {body}"));
+        error!(%status, "userinfo request failed: {body}");
+        return Err(anyhow!("userinfo returned HTTP {status}"));
     }
 
-    let info: UserInfo = serde_json::from_str(&body)
-        .with_context(|| format!("Failed to parse userinfo JSON: {body}"))?;
+    let info: UserInfo = serde_json::from_str(&body).map_err(|e| {
+        error!("failed to parse userinfo response: {e} — body: {body}");
+        anyhow!("Unexpected response format from Google. Please try again.")
+    })?;
 
     Ok(GoogleUserInfo {
         sub: info.sub,
