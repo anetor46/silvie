@@ -90,7 +90,7 @@ export const TOOL_INFO: Record<string, ToolInfo> = {
     icon: 'mail',
     brief: () => 'Reading the full body of one email message.',
   },
-  list_calendar_events: {
+  get_calendar_events: {
     label: 'Checking calendar',
     verb: 'Checking',
     icon: 'calendar',
@@ -192,5 +192,16 @@ export const TOOL_INFO: Record<string, ToolInfo> = {
 };
 
 export function getToolInfo(name: string): ToolInfo {
-  return TOOL_INFO[name] ?? { label: name, verb: 'Running', icon: 'tool' };
+  return TOOL_INFO[name] ?? { label: humaniseName(name), verb: 'Running', icon: 'tool' };
+}
+
+/** Defensive: turn an unknown snake_case tool name into a readable label
+ *  ("foo_bar_baz" → "Foo bar baz") so the UI never shows a raw identifier
+ *  even if a new backend tool is registered before its frontend entry. */
+function humaniseName(snake: string): string {
+  if (!snake) return 'Tool';
+  const words = snake.split(/[_\s-]+/).filter(Boolean);
+  if (words.length === 0) return snake;
+  const [head, ...tail] = words;
+  return [head.charAt(0).toUpperCase() + head.slice(1), ...tail].join(' ');
 }

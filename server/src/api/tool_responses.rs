@@ -171,35 +171,55 @@ pub async fn tool_response_handler(
     Ok(SSE::new(sse_events(combined)).keep_alive(std::time::Duration::from_secs(15)))
 }
 
+/// Human-readable description of what a write tool *does*. Used in the
+/// synthesised continuation prompts so the model talks about "sending
+/// the email" instead of echoing the raw `send_email` identifier at the
+/// user.
+fn friendly_action(tool_name: &str) -> &'static str {
+    match tool_name {
+        "send_email" => "sending the email",
+        "reply_to_email" => "replying to the email",
+        "create_calendar_event" => "creating the calendar event",
+        "update_calendar_event" => "updating the calendar event",
+        "delete_calendar_event" => "deleting the calendar event",
+        "respond_to_event" => "responding to the calendar invitation",
+        "hotel_book" => "booking the hotel",
+        _ => "the requested action",
+    }
+}
+
 fn approval_prompt(tool_name: &str, summary: Option<&str>) -> String {
+    let action = friendly_action(tool_name);
     match summary {
         Some(s) => format!(
-            "[The user approved your previous `{tool_name}` action. It completed successfully: {s}. Acknowledge briefly and continue.]"
+            "[The user approved {action}. It completed successfully: {s}. Acknowledge briefly and continue.]"
         ),
         None => format!(
-            "[The user approved your previous `{tool_name}` action and it completed successfully. Acknowledge briefly and continue.]"
+            "[The user approved {action} and it completed successfully. Acknowledge briefly and continue.]"
         ),
     }
 }
 
 fn rejection_prompt(tool_name: &str, reason: Option<&str>) -> String {
+    let action = friendly_action(tool_name);
     match reason {
         Some(r) => format!(
-            "[The user rejected your previous `{tool_name}` action with the reason: \"{r}\". Acknowledge and offer an alternative if appropriate.]"
+            "[The user rejected {action} with the reason: \"{r}\". Acknowledge and offer an alternative if appropriate.]"
         ),
         None => format!(
-            "[The user rejected your previous `{tool_name}` action. The action was NOT performed. Acknowledge and offer an alternative if appropriate.]"
+            "[The user decided not to proceed with {action}. The action was NOT performed. Acknowledge and offer an alternative if appropriate.]"
         ),
     }
 }
 
 fn failure_prompt(tool_name: &str, error: Option<&str>) -> String {
+    let action = friendly_action(tool_name);
     match error {
         Some(e) => format!(
-            "[Your previous `{tool_name}` action was approved but FAILED to execute: {e}. Apologise and either retry with different parameters or offer an alternative.]"
+            "[{action} was approved but FAILED to execute: {e}. Apologise and either retry with different parameters or offer an alternative.]"
         ),
         None => format!(
-            "[Your previous `{tool_name}` action was approved but FAILED to execute. Apologise and either retry or offer an alternative.]"
+            "[{action} was approved but FAILED to execute. Apologise and either retry or offer an alternative.]"
         ),
     }
 }
