@@ -11,8 +11,16 @@ use oauth2::{
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::AppHandle;
+use tauri_plugin_oauth::OauthConfig;
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, instrument, warn};
+
+/// Fixed loopback port for the Google Calendar OAuth callback.
+/// Must be registered in Google Cloud Console as an authorized redirect URI:
+///   http://127.0.0.1:1422
+/// Using a fixed port lets us use a Web application client (which requires
+/// exact URI matching) rather than a Desktop app client.
+const GOOGLE_OAUTH_PORT: u16 = 1422;
 
 /// Tokens returned to the frontend after a successful OAuth dance. The frontend
 /// forwards these to `POST /users/me/integrations` so the backend takes over
@@ -46,15 +54,21 @@ pub async fn google_oauth_flow(
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
     let sender = Arc::new(Mutex::new(Some(tx)));
 
-    let port = tauri_plugin_oauth::start(move |url| {
-        debug!("loopback server received redirect: {url}");
-        if let Ok(mut guard) = sender.lock() {
-            if let Some(tx) = guard.take() {
-                let _ = tx.send(url);
+    let port = tauri_plugin_oauth::start_with_config(
+        OauthConfig {
+            ports: Some(vec![GOOGLE_OAUTH_PORT]),
+            response: None,
+        },
+        move |url| {
+            debug!("loopback server received redirect: {url}");
+            if let Ok(mut guard) = sender.lock() {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(url);
+                }
             }
-        }
-    })
-    .map_err(|e| anyhow!("Failed to start OAuth server: {e}"))?;
+        },
+    )
+    .map_err(|e| anyhow!("Failed to start OAuth server on port {GOOGLE_OAUTH_PORT}: {e}"))?;
     info!("loopback server started on port {port}");
 
     let http_client = reqwest::ClientBuilder::new()
@@ -73,7 +87,7 @@ pub async fn google_oauth_flow(
                 .context("Invalid token URL")?,
         )
         .set_redirect_uri(
-            RedirectUrl::new(format!("http://127.0.0.1:{port}"))
+            RedirectUrl::new(format!("http://127.0.0.1:{GOOGLE_OAUTH_PORT}"))
                 .context("Invalid redirect URL")?,
         );
 
