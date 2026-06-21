@@ -326,6 +326,47 @@ pub struct ToolMessageContent {
     pub output: Option<serde_json::Value>,
 }
 
+/// Sweep any tool rows for this conversation still in `status='running'`
+/// and mark them as cancelled. Called at the end of every chat stream
+/// (cancel, error, or normal completion) so we never leave the model
+/// staring at an `awaiting_user_input` result on the next turn for a
+/// tool whose execution was aborted.
+#[instrument(skip(pool))]
+pub async fn mark_running_tools_cancelled(pool: &DbPool, conv_id: Uuid) -> Result<usize> {
+    let mut conn = pool.get().await.context("Failed to get DB connection")?;
+    let rows: Vec<(Uuid, String)> = messages::table
+        .filter(messages::conversation_id.eq(conv_id))
+        .filter(messages::role.eq("tool"))
+        .select((messages::id, messages::content))
+        .load(&mut conn)
+        .await
+        .context("Failed to load tool rows for cancellation sweep")?;
+
+    let mut updated = 0_usize;
+    for (id, content) in rows {
+        let Ok(mut payload) = serde_json::from_str::<ToolMessageContent>(&content) else {
+            continue;
+        };
+        if payload.status != "running" {
+            continue;
+        }
+        payload.status = "error".into();
+        payload.success = Some(false);
+        payload.summary = Some("cancelled".into());
+        let new_content = match serde_json::to_string(&payload) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        diesel::update(messages::table.filter(messages::id.eq(id)))
+            .set(messages::content.eq(new_content))
+            .execute(&mut conn)
+            .await
+            .context("Failed to mark tool row cancelled")?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
 /// Look up a still-pending tool call by `tool_call_id`, ensuring the
 /// conversation it lives in belongs to `user_id`. Returns `None` if the
 /// call doesn't exist, isn't owned by the user, or has already been

@@ -108,6 +108,12 @@ fn result_content_for(payload: &ToolMessageContent) -> String {
             let reason = payload.summary.as_deref().unwrap_or("failed");
             format!("{{\"error\":\"{}\"}}", reason.replace('"', "\\\""))
         }
+        // 'running' would only land here if the cancellation sweep missed
+        // it (process crash mid-stream). Treat as cancelled so the model
+        // doesn't loop on a phantom awaiting marker.
+        "running" => r#"{"error":"cancelled"}"#.to_string(),
+        // 'pending_user' really means the user hasn't decided yet — but
+        // by the time we replay history, that state should be terminal.
         _ => r#"{"status":"awaiting_user_input"}"#.to_string(),
     }
 }

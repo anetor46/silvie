@@ -2,10 +2,12 @@
 //! response. The bulk of the streaming machinery lives in `chat_stream` so
 //! the `/chat/tool-responses` endpoint can reuse it for continuations.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use anyhow::Error;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use poem::{
     handler,
     web::{
@@ -13,8 +15,9 @@ use poem::{
         Data, Json,
     },
 };
+use tokio::sync::Notify;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::{
@@ -124,22 +127,57 @@ where
     })
 }
 
+/// Stream wrapper that fires a `Notify` when dropped. The spawned task on
+/// the other side `select!`s every iteration against `cancel.notified()`;
+/// when the consumer (poem's SSE response) gets dropped — which happens on
+/// client disconnect OR explicit cancel — this wrapper drops, notify fires,
+/// the task breaks out of its loop, drops the rig stream, and that cascades
+/// down through `reqwest` to cancel the in-flight Gemini HTTP call.
+///
+/// This is the canonical "task lifetime tied to stream lifetime" pattern
+/// for streaming endpoints — copy it for any future SSE handler.
+struct CancelOnDrop<S> {
+    inner: S,
+    cancel: Arc<Notify>,
+}
+
+impl<S: Stream + Unpin> Stream for CancelOnDrop<S> {
+    type Item = S::Item;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl<S> Drop for CancelOnDrop<S> {
+    fn drop(&mut self) {
+        self.cancel.notify_one();
+    }
+}
+
 /// Shared streaming machinery used by both `/chat` and
 /// `/chat/tool-responses`. Spawns a task that drives `LlmClient::stream`,
 /// persists tool rows and assistant text as events arrive, and returns a
-/// stream of typed `SseEvent`s the caller wraps as SSE (optionally
-/// prepending its own events).
+/// stream of typed `SseEvent`s wrapped in `CancelOnDrop` so dropping the
+/// returned stream aborts the underlying work.
+///
+/// Cancellation semantics: cooperative — the select happens BETWEEN events,
+/// so an in-flight DB write completes before the loop notices the cancel.
+/// No partial DB rows; in-flight rig HTTP calls are aborted via future drop.
 pub fn run_turn(
     client: Arc<LlmClient>,
     pool: DbPool,
     convo_id: Uuid,
     turn: ChatTurn,
-) -> UnboundedReceiverStream<SseEvent> {
+) -> impl Stream<Item = SseEvent> + Send + 'static {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseEvent>();
+    let cancel = Arc::new(Notify::new());
+    let cancel_for_task = cancel.clone();
 
     tokio::spawn(async move {
+        let cancel = cancel_for_task;
         let mut text_buffer = String::new();
         let mut client_disconnected = false;
+        let mut cancelled = false;
 
         let send = |ev: SseEvent, disconnected: &mut bool| {
             if !*disconnected && tx.send(ev).is_err() {
@@ -161,7 +199,16 @@ pub fn run_turn(
 
         match client.stream(turn).await {
             Ok(mut stream) => {
-                while let Some(item) = stream.next().await {
+                loop {
+                    let item = tokio::select! {
+                        biased;
+                        _ = cancel.notified() => {
+                            cancelled = true;
+                            break;
+                        }
+                        item = stream.next() => item,
+                    };
+                    let Some(item) = item else { break };
                     match item {
                         Ok(ChatEvent::Text(chunk)) if chunk.is_empty() => continue,
                         Ok(ChatEvent::Text(chunk)) => {
@@ -238,34 +285,52 @@ pub fn run_turn(
                             error!("model stream error: {e:#}");
                             let friendly = friendly_error_message(&e);
                             text_buffer.push_str(&friendly);
-                            send(
-                                SseEvent::Token { text: friendly },
-                                &mut client_disconnected,
-                            );
+                            send(SseEvent::Token { text: friendly }, &mut client_disconnected);
                             send(SseEvent::Done, &mut client_disconnected);
                             break;
                         }
                     }
                 }
-                send(SseEvent::Done, &mut client_disconnected);
+                if !cancelled {
+                    send(SseEvent::Done, &mut client_disconnected);
+                }
             }
             Err(e) => {
                 error!("failed to start chat stream: {e:#}");
                 let fallback = "I encountered an issue getting ready to respond. Please try again."
                     .to_string();
                 text_buffer.push_str(&fallback);
-                send(
-                    SseEvent::Token { text: fallback },
-                    &mut client_disconnected,
-                );
+                send(SseEvent::Token { text: fallback }, &mut client_disconnected);
                 send(SseEvent::Done, &mut client_disconnected);
             }
         }
 
+        // Persist any trailing assistant text — partial responses are
+        // still useful for context even after a cancel.
         flush_text(&mut text_buffer, &pool, convo_id).await;
+
+        // Sweep tool rows that were mid-execution. Runs after cancel,
+        // error, and normal completion — idempotent (no-op if nothing was
+        // running). Keeps history reconstruction sane on the next turn.
+        match conversations::mark_running_tools_cancelled(&pool, convo_id).await {
+            Ok(n) if n > 0 => info!(
+                conversation_id = %convo_id,
+                cancelled_tool_rows = n,
+                "marked tool rows cancelled after stream ended"
+            ),
+            Err(e) => error!("failed to sweep cancelled tool rows: {e:#}"),
+            _ => {}
+        }
+
+        if cancelled {
+            info!(conversation_id = %convo_id, "chat stream cancelled by client");
+        }
     });
 
-    UnboundedReceiverStream::new(rx)
+    CancelOnDrop {
+        inner: UnboundedReceiverStream::new(rx),
+        cancel,
+    }
 }
 
 /// Look up Google + Stripe credentials for the user. Both are optional —
