@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { tick } from 'svelte';
+
   let {
     value = $bindable(''),
     onSend,
@@ -6,6 +8,22 @@
     value?: string;
     onSend: () => void;
   } = $props();
+
+  let textarea = $state<HTMLTextAreaElement | undefined>(undefined);
+
+  function autoResize() {
+    if (!textarea) return;
+    // Reset first so shrinking works when lines are deleted.
+    textarea.style.height = 'auto';
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }
+
+  // Re-run whenever value changes — catches both typing and programmatic
+  // resets (e.g. value = '' after send).
+  $effect(() => {
+    void value;
+    tick().then(autoResize);
+  });
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -18,7 +36,9 @@
 <footer class="input-bar">
   <div class="input-wrapper">
     <textarea
+      bind:this={textarea}
       bind:value
+      oninput={autoResize}
       onkeydown={handleKeydown}
       placeholder="Message Silvie…"
       rows="1"
@@ -35,6 +55,7 @@
       </svg>
     </button>
   </div>
+
   <p class="disclaimer">Silvie can make mistakes. Verify important travel details.</p>
 </footer>
 
@@ -47,13 +68,16 @@
   }
 
   .input-wrapper {
-    display: flex;
-    align-items: flex-end;
-    gap: 10px;
+    position: relative;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 14px;
-    padding: 10px 12px;
+    /*
+     * No right padding: the textarea fills the full width so its native
+     * scrollbar lands flush against this border. The textarea's own
+     * padding-right reserves the space for the send button + gap.
+     */
+    padding: 10px 0 10px 12px;
     max-width: 720px;
     margin: 0 auto;
     transition: border-color 0.15s, background 0.15s;
@@ -65,7 +89,8 @@
   }
 
   .input {
-    flex: 1;
+    display: block;
+    width: 100%;
     background: transparent;
     border: none;
     outline: none;
@@ -74,8 +99,32 @@
     font-family: inherit;
     line-height: 1.6;
     resize: none;
-    max-height: 160px;
+    /* Match button height so the wrapper has room for the absolutely-
+       positioned send button (10px top + 32px btn + 10px bottom). */
+    min-height: 32px;
+    max-height: calc(50dvh - 80px);
     overflow-y: auto;
+    /*
+     * right padding = button-right-offset(10px) + button-width(32px) +
+     *                 gap(6px) + scrollbar-width(4px) = 52px.
+     * This keeps text from flowing under the button or the scrollbar.
+     */
+    padding-right: 52px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+
+  .input::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .input::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .input::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 2px;
   }
 
   .input::placeholder {
@@ -83,6 +132,9 @@
   }
 
   .send-btn {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -93,7 +145,6 @@
     background: var(--purple-600);
     color: #fff;
     cursor: pointer;
-    flex-shrink: 0;
     transition: background 0.15s, opacity 0.15s;
   }
 

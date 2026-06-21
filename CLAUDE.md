@@ -8,21 +8,21 @@ Silvie is an AI-powered personal assistant for executives on the road. It acts a
 
 ## Tech stack
 
-| Layer | Technology |
-|---|---|
-| Desktop shell | Tauri 2 |
-| Frontend framework | SvelteKit 2 + Svelte 5 (runes) |
-| Language | TypeScript (frontend), Rust (Tauri shell + standalone backend) |
-| Package manager | pnpm |
-| Bundler | Vite 6 |
-| Backend HTTP | `poem` 3 (SSE-enabled) |
-| Backend DB | Postgres + `diesel` (sync, migrations) + `diesel-async` (bb8 pool, queries) |
-| Identity provider | Auth0 (managed via Terraform under `infra/terraform/auth0`) |
-| AI framework | `rig-core` (Rust) |
-| LLM provider | Gemini (`gemini-2.0-flash`) over its free tier |
-| Payments | Stripe (SetupIntents + Issuing virtual cards) |
-| Travel inventory | Travelport (hotel search + book) |
-| App ↔ backend protocol | JSON over HTTP, Server-Sent Events for `/chat` |
+| Layer                  | Technology                                                                  |
+|------------------------|-----------------------------------------------------------------------------|
+| Desktop shell          | Tauri 2                                                                     |
+| Frontend framework     | SvelteKit 2 + Svelte 5 (runes)                                              |
+| Language               | TypeScript (frontend), Rust (Tauri shell + standalone backend)              |
+| Package manager        | pnpm                                                                        |
+| Bundler                | Vite 6                                                                      |
+| Backend HTTP           | `poem` 3 (SSE-enabled)                                                      |
+| Backend DB             | Postgres + `diesel` (sync, migrations) + `diesel-async` (bb8 pool, queries) |
+| Identity provider      | Auth0 (managed via Terraform under `infra/terraform/auth0`)                 |
+| AI framework           | `rig-core` (Rust)                                                           |
+| LLM provider           | Gemini (`gemini-2.0-flash`) over its free tier                              |
+| Payments               | Stripe (SetupIntents + Issuing virtual cards)                               |
+| Travel inventory       | Travelport (hotel search + book)                                            |
+| App ↔ backend protocol | JSON over HTTP, Server-Sent Events for `/chat`                              |
 
 ## Repo structure
 
@@ -80,6 +80,7 @@ silvie/
 │   │   │   ├── client.rs       # LlmClient::stream — builds agent + tools per turn
 │   │   │   └── context.rs      # ChatTurn, LocaleContext, ToolAuth, StripePaymentRefs
 │   │   └── tools/              # LLM tools (rig::tool::Tool impls)
+│   │       ├── gmail/             # get/list/reply/send emails
 │   │       ├── google_calendar/   # create/update/delete/list/respond_event, find_free_time
 │   │       └── travelport/        # hotel_search, hotel_book (+ shared auth)
 │   ├── prompts/                # Tool descriptions (`include_str!`'d into tool defs)
@@ -140,11 +141,11 @@ The frontend talks to the backend at `http://localhost:8080` by default. Overrid
 
 The backend has a three-layer split. Keep new code on the right side of these lines:
 
-| Layer | Module | Responsibility |
-|---|---|---|
-| **`api/`** | poem `#[handler]` functions | Wire-up only: extract auth, parse request, call repo/service, return JSON. No DB queries, no HTTP clients. |
-| **`repos/`** | diesel queries | Owns all DB I/O. Functions take `&DbPool` and typed args, return `Result<…>`. No `poem` types, no HTTP. |
-| **`services/`** | external HTTP clients | Talks to third-party APIs (Stripe today; add a file per new vendor). No DB. |
+| Layer           | Module                      | Responsibility                                                                                             |
+|-----------------|-----------------------------|------------------------------------------------------------------------------------------------------------|
+| **`api/`**      | poem `#[handler]` functions | Wire-up only: extract auth, parse request, call repo/service, return JSON. No DB queries, no HTTP clients. |
+| **`repos/`**    | diesel queries              | Owns all DB I/O. Functions take `&DbPool` and typed args, return `Result<…>`. No `poem` types, no HTTP.    |
+| **`services/`** | external HTTP clients       | Talks to third-party APIs (Stripe today; add a file per new vendor). No DB.                                |
 
 `llm/` and `tools/` are separate — the LLM client orchestrates rig agents and the tools embedded in them. Tools may take a `DbPool` (e.g. `HotelBookTool` logs issuing-card audit rows) but stay outside `api/`/`repos/`.
 
