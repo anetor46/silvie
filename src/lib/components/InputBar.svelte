@@ -4,9 +4,15 @@
   let {
     value = $bindable(''),
     onSend,
+    disabled = false,
   }: {
     value?: string;
     onSend: () => void;
+    /** Hard-blocks send (button + Enter) while a stream is in flight on the
+     *  current conversation. The textarea stays editable so the user can
+     *  draft the next message; submission unlocks the moment the stream
+     *  ends. */
+    disabled?: boolean;
   } = $props();
 
   let textarea = $state<HTMLTextAreaElement | undefined>(undefined);
@@ -28,6 +34,7 @@
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      if (disabled) return;
       onSend();
     }
   }
@@ -47,8 +54,8 @@
     <button
       class="send-btn"
       onclick={onSend}
-      disabled={!value.trim()}
-      aria-label="Send"
+      disabled={disabled || !value.trim()}
+      aria-label={disabled ? 'Waiting for the assistant to finish' : 'Send'}
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
         <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />

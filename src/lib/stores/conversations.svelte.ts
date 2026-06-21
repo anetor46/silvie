@@ -69,6 +69,21 @@ class ConversationsStore {
   currentId = $state<string | null>(null);
   currentMessages = $state<Message[]>([]);
 
+  /** True while the agent is computing the next step (stream is in flight)
+   *  and there's nothing else visibly progressing — used to render the
+   *  "thinking" 3-dot indicator at the bottom of the message list. Driven
+   *  by the chat page from the stream lifecycle: set true on start / between
+   *  tool calls / after a tool result; false on token arrival, when a
+   *  confirmation widget appears, and at stream end. */
+  isThinking = $state(false);
+
+  /** True for the entire lifetime of an SSE stream (initial chat OR a
+   *  tool-response resume). The input bar uses this to block the user from
+   *  posting a second turn while one is in flight — concurrent turns on
+   *  the same conversation would interleave events on the backend and
+   *  break history reconstruction. */
+  isStreaming = $state(false);
+
   get active(): Conversation | undefined {
     return this.list.find((c) => c.id === this.currentId);
   }
@@ -242,12 +257,22 @@ class ConversationsStore {
 
   // ── Logout cleanup ─────────────────────────────────────────────────────
 
+  setThinking(value: boolean): void {
+    this.isThinking = value;
+  }
+
+  setStreaming(value: boolean): void {
+    this.isStreaming = value;
+  }
+
   reset(): void {
     this.list = [];
     this.loaded = false;
     this.currentId = null;
     this.currentMessages = [];
     this.error = null;
+    this.isThinking = false;
+    this.isStreaming = false;
   }
 }
 

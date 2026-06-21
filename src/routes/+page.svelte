@@ -40,11 +40,15 @@
 
   /** Build a fresh set of callbacks that pipe SSE events into the
    *  conversation store. Tokens for the resume stream go into a *new*
-   *  assistant placeholder created lazily on first token. */
+   *  assistant placeholder created lazily on first token. Each callback
+   *  also nudges the `isThinking` flag so the bottom-of-chat 3-dot wave
+   *  appears whenever there's no other visible progress. */
   function makeCallbacks(): ChatCallbacks {
     let assistantId: string | null = null;
     return {
       onToken: (chunk) => {
+        // Text is now arriving — hide the thinking dots.
+        conversations.setThinking(false);
         if (!assistantId) {
           assistantId = conversations.startAssistantMessage();
         }
@@ -56,6 +60,11 @@
         // creates a new bubble below the tool card.
         assistantId = null;
         conversations.appendToolCall(call);
+        // While a tool is RUNNING we keep the indicator on (the card has
+        // its own spinner, but the global indicator reinforces progress).
+        // For a PENDING_USER call we hide it — the confirmation widget IS
+        // the user-facing prompt now.
+        conversations.setThinking(!call.requiresConfirmation);
         scrollToBottom();
       },
       onToolResult: (result) => {
@@ -65,6 +74,8 @@
           result.summary,
           result.output,
         );
+        // Tool finished — model is computing the next text / tool call.
+        conversations.setThinking(true);
         scrollToBottom();
       },
     };
@@ -73,8 +84,9 @@
   async function sendMessage() {
     const text = inputValue.trim();
     if (!text) return;
-
-    currentStream?.cancel();
+    // Defense in depth — the InputBar already disables submission while a
+    // stream is in flight, but guard here too in case anything bypasses it.
+    if (conversations.isStreaming) return;
 
     const isFirstMessage = !conversations.currentId;
     let conversationId: string;
@@ -87,6 +99,10 @@
 
     conversations.appendUserMessage(text);
     inputValue = '';
+    // Start thinking before the first event lands so the user sees
+    // immediate feedback even if the server takes a moment.
+    conversations.setStreaming(true);
+    conversations.setThinking(true);
     scrollToBottom();
 
     const handle = streamChat(conversationId, text, makeCallbacks(), localeContext());
@@ -100,6 +116,8 @@
         conversations.appendToAssistant(id, `\n\n_⚠️ ${message}_`);
       })
       .finally(() => {
+        conversations.setThinking(false);
+        conversations.setStreaming(false);
         if (currentStream === handle) currentStream = null;
         if (isFirstMessage) {
           void conversations.refreshCurrentInList();
@@ -113,11 +131,15 @@
    *  new SSE stream that emits the tool result + any follow-up assistant
    *  text the resumed agent produces. */
   async function handleToolResponse(callId: string, response: ToolResponse): Promise<void> {
-    currentStream?.cancel();
+    if (conversations.isStreaming) return;
 
     if (response.kind === 'confirmation') {
       conversations.setDecision(callId, response.approved ? 'approved' : 'rejected');
     }
+    // Resume stream is starting — flip the streaming flag so the input bar
+    // locks until the model finishes its follow-up.
+    conversations.setStreaming(true);
+    conversations.setThinking(true);
     scrollToBottom();
 
     const handle = postToolResponse(callId, response, makeCallbacks(), localeContext());
@@ -131,6 +153,8 @@
         conversations.appendToAssistant(id, `\n\n_⚠️ ${message}_`);
       })
       .finally(() => {
+        conversations.setThinking(false);
+        conversations.setStreaming(false);
         if (currentStream === handle) currentStream = null;
       });
   }
@@ -148,7 +172,11 @@
   {/if}
 </main>
 
-<InputBar bind:value={inputValue} onSend={sendMessage} />
+<InputBar
+  bind:value={inputValue}
+  onSend={sendMessage}
+  disabled={conversations.isStreaming}
+/>
 
 <style>
   .chat-area {

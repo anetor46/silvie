@@ -4,6 +4,8 @@
   import MessageItem from './Message.svelte';
   import ToolCallCard from './ToolCallCard.svelte';
   import ConfirmationWidget from './ConfirmationWidget.svelte';
+  import ThinkingIndicator from './ThinkingIndicator.svelte';
+  import { conversations } from '$lib/stores/conversations.svelte';
 
   let {
     messages,
@@ -27,6 +29,9 @@
       <MessageItem message={msg} />
     {/if}
   {/each}
+  {#if conversations.isThinking}
+    <ThinkingIndicator />
+  {/if}
 </div>
 
 <style>
