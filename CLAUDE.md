@@ -4,135 +4,234 @@
 
 Silvie is an AI-powered personal assistant for executives on the road. It acts as a unified command center for trips, meetings, bookings, receipts, and follow-ups — think "AI Chief of Staff for business travel and executive logistics." See `README.md` for the full product vision.
 
-Current state: hello-world scaffold. The product vision is defined but the features are not yet built.
+**Current state.** Core foundation is in place: Auth0 sign-in / sign-up, Postgres-backed user/profile/payment/integration data, streaming chat with tool-using LLM agent (Gemini + `rig`), Google integration (Gmail + Calendar) via OAuth, Stripe-based payment-method storage with Issuing virtual cards for bookings, and a Travelport hotel-booking tool. The UI surfaces conversations, a connectors page, and a user-profile panel.
 
 ## Tech stack
 
 | Layer | Technology |
 |---|---|
 | Desktop shell | Tauri 2 |
-| Frontend framework | SvelteKit 2 + Svelte 5 |
+| Frontend framework | SvelteKit 2 + Svelte 5 (runes) |
 | Language | TypeScript (frontend), Rust (Tauri shell + standalone backend) |
 | Package manager | pnpm |
 | Bundler | Vite 6 |
-| Backend HTTP | `poem` (Rust) |
+| Backend HTTP | `poem` 3 (SSE-enabled) |
+| Backend DB | Postgres + `diesel` (sync, migrations) + `diesel-async` (bb8 pool, queries) |
+| Identity provider | Auth0 (managed via Terraform under `infra/terraform/auth0`) |
 | AI framework | `rig-core` (Rust) |
 | LLM provider | Gemini (`gemini-2.0-flash`) over its free tier |
-| App ↔ backend protocol | Server-Sent Events |
+| Payments | Stripe (SetupIntents + Issuing virtual cards) |
+| Travel inventory | Travelport (hotel search + book) |
+| App ↔ backend protocol | JSON over HTTP, Server-Sent Events for `/chat` |
 
 ## Repo structure
 
 ```
 silvie/
-├── Cargo.toml            # Workspace root — members: src-tauri, server
-├── src/                  # SvelteKit frontend
-│   ├── routes/           # File-based routing (+page.svelte, +layout.ts)
-│   ├── lib/
-│   │   ├── components/   # Svelte components
-│   │   ├── services/     # Frontend services (incl. chat.ts SSE client)
-│   │   ├── stores/       # Svelte 5 runes stores
-│   │   ├── data/         # Static data (connectors, preferences, events)
-│   │   └── types.ts
-│   └── app.html
-├── src-tauri/            # Rust / Tauri desktop shell
-│   ├── src/{main.rs, lib.rs}
-│   ├── Cargo.toml
+├── Cargo.toml                  # Workspace root — members: src-tauri, server
+├── docker-compose.yml          # Postgres + silvie-server containers
+├── server.Dockerfile
+├── src/                        # SvelteKit frontend (static-adapter build)
+│   ├── routes/                 # +layout.svelte, +page.svelte, connectors/, timeline/
+│   └── lib/
+│       ├── components/         # Svelte 5 components (Login, UserPanel, Sidebar, …)
+│       ├── services/           # Backend clients — never fetched directly from components
+│       │                       #   auth.ts, users.ts, user-info.ts, payment.ts,
+│       │                       #   connectors.ts, conversations.ts, chat.ts
+│       ├── stores/             # Svelte 5 runes stores — one per service
+│       ├── data/               # Static reference data (countries, connectors, events)
+│       └── types.ts
+├── src-tauri/                  # Tauri desktop shell
+│   ├── src/
+│   │   ├── lib.rs              # Tauri commands + builder
+│   │   ├── main.rs
+│   │   ├── config.rs           # Env-var loader (Auth0Config, GoogleOAuthConfig, …)
+│   │   ├── auth0/              # Auth0 integration
+│   │   │   ├── client.rs       # HTTP flows (password, signup, reset, browser PKCE)
+│   │   │   ├── keychain.rs     # OS-keychain reads/writes + token refresh
+│   │   │   └── types.rs        # AuthUser, TokenSet, StoredAuthCredentials
+│   │   └── integrations/       # Third-party OAuth handshakes
+│   │       ├── mod.rs          # Shared OAuthTokens type
+│   │       └── google.rs       # Unified Google (Gmail + Calendar) OAuth flow
 │   └── tauri.conf.json
-├── server/               # Standalone Rust HTTP backend (poem + rig + Gemini)
-│   ├── src/{main.rs, server.rs, chat.rs, llm.rs, types.rs}
-│   ├── Cargo.toml
-│   └── .env.example
-├── static/
-├── .env.example          # frontend env (VITE_SILVIE_SERVER_URL)
-├── package.json
-├── svelte.config.js
-├── vite.config.js
-└── tsconfig.json
+├── server/                     # Standalone Rust HTTP backend
+│   ├── src/
+│   │   ├── main.rs             # Bootstrap: config → migrations → pool → JWKS → LlmClient → run
+│   │   ├── server.rs           # Route table + middleware (CORS, shared state)
+│   │   ├── config.rs           # Env-var loader (single source of truth)
+│   │   ├── settings.rs         # `config` crate (host/port via config/*.toml)
+│   │   ├── db.rs               # bb8 pool + embedded migration runner
+│   │   ├── error.rs            # ApiError + ResponseError + OptionExt helpers
+│   │   ├── schema.rs           # Generated by `diesel print-schema`
+│   │   ├── types.rs            # Wire shapes shared between handlers
+│   │   ├── auth/               # JWT validator + extractors
+│   │   │   ├── jwt.rs          # JwtValidator (JWKS fetch + RS256 verify)
+│   │   │   ├── principal.rs    # Principal extractor — JWT-only
+│   │   │   └── authed_user.rs  # AuthUser extractor — JWT + DB user row
+│   │   ├── repos/              # ORM/data layer — pure DB I/O, no HTTP
+│   │   │   ├── users.rs, user_info.rs, payments.rs,
+│   │   │   ├── integrations.rs, conversations.rs
+│   │   ├── api/                # poem handlers — thin wrappers over repos + services
+│   │   │   ├── users.rs, user_info.rs, payments.rs,
+│   │   │   ├── integrations.rs, conversations.rs, chat.rs
+│   │   ├── services/           # External HTTP clients (no DB)
+│   │   │   └── stripe.rs       # PaymentClient (SetupIntent, Issuing cards)
+│   │   ├── llm/                # Gemini + rig glue
+│   │   │   ├── client.rs       # LlmClient::stream — builds agent + tools per turn
+│   │   │   └── context.rs      # ChatTurn, LocaleContext, ToolAuth, StripePaymentRefs
+│   │   └── tools/              # LLM tools (rig::tool::Tool impls)
+│   │       ├── google_calendar/   # create/update/delete/list/respond_event, find_free_time
+│   │       └── travelport/        # hotel_search, hotel_book (+ shared auth)
+│   ├── prompts/                # Tool descriptions (`include_str!`'d into tool defs)
+│   ├── migrations/             # diesel-managed SQL
+│   ├── config/                 # default.toml + per-env overrides
+│   └── Cargo.toml
+├── infra/terraform/            # Auth0 + AWS (DO NOT apply)
+└── website/
 ```
 
 ## Dev commands
 
-The app needs **two processes running**: the Rust backend (LLM proxy) and the Tauri shell.
+The app needs **three things running**: Postgres, the Rust backend, and the Tauri shell.
 
 ```bash
-# ── Terminal 1: backend (LLM proxy) ───────────────────────────────────────
-cp server/.env.example server/.env   # first time only — then fill GEMINI_API_KEY
-cd server && cargo run               # listens on http://127.0.0.1:8080
-# or, containerised (also reads server/.env):
-docker compose up --build            # from repo root
+# ── Terminal 1: Postgres (host :12345, container :5432) ──────────────────────
+docker compose up -d postgres
 
-# ── Terminal 2: Tauri desktop app ────────────────────────────────────────
-pnpm tauri dev                       # full app
+# ── Terminal 2: backend ──────────────────────────────────────────────────────
+# First time only:  cp server/.env.example server/.env  (fill GEMINI_API_KEY,
+# AUTH0_DOMAIN, AUTH0_AUDIENCE, DATABASE_URL, and optionally STRIPE_/TRAVELPORT_/
+# GOOGLE_CLIENT_*). Then:
+cd server && cargo run                # listens on http://127.0.0.1:8080
+# or fully containerised (still needs root .env for GEMINI_API_KEY):
+docker compose up --build
+
+# ── Terminal 3: Tauri desktop app ────────────────────────────────────────────
+pnpm tauri dev                        # full app
 # or:
-pnpm dev                             # browser-only frontend at http://localhost:5173
+pnpm dev                              # browser-only frontend at http://localhost:5173
 
-# ── Other ─────────────────────────────────────────────────────────────────
-pnpm check                           # type-check frontend
-cargo check --workspace              # type-check all Rust crates
-pnpm tauri build                     # build distributable desktop app
+# ── Verification ─────────────────────────────────────────────────────────────
+pnpm check                            # type-check frontend (svelte-check)
+cargo check --workspace               # type-check all Rust crates
+pnpm tauri build                      # build distributable desktop app
+
+# ── Database ─────────────────────────────────────────────────────────────────
+# Migrations run automatically on server startup via `diesel_migrations`.
+# To inspect schema:
+docker exec -it postgres psql -U root -d silvie
+# After editing migrations, regenerate the schema file:
+cd server && diesel print-schema > src/schema.rs
 ```
 
-The chat UI talks to the backend at `http://localhost:8080` by default. Override with `VITE_SILVIE_SERVER_URL` in a root `.env`.
+The frontend talks to the backend at `http://localhost:8080` by default. Override with `VITE_SILVIE_SERVER_URL` in a root `.env`.
 
 ## Key config
 
-- Tauri dev URL: `http://localhost:1420`  
+- Tauri dev URL: `http://localhost:1420`
+- Backend dev URL: `http://localhost:8080`
+- Postgres (host): `localhost:12345`, db `silvie`, user `root`, password `test`
+- Auth0 loopback callback port: `1421` (registered in Auth0 client)
+- Google OAuth loopback callback port: `1422` (must be registered in Google Cloud Console as `http://127.0.0.1:1422`)
 - Frontend output dir (for Tauri): `../build` (via `@sveltejs/adapter-static`)
 - App identifier: `com.silvie`
-- Default window: 800×600
 
-## Testing / previewing
+## Backend architecture
 
-The Claude Code built-in preview tool does not work with Tauri — always ask the user to test the app manually with `pnpm tauri dev` (full desktop app) or `pnpm dev` (browser-only frontend at http://localhost:5173). Do not attempt to use the preview tool or take automated screenshots.
+The backend has a three-layer split. Keep new code on the right side of these lines:
 
-## Verifying Rust changes
+| Layer | Module | Responsibility |
+|---|---|---|
+| **`api/`** | poem `#[handler]` functions | Wire-up only: extract auth, parse request, call repo/service, return JSON. No DB queries, no HTTP clients. |
+| **`repos/`** | diesel queries | Owns all DB I/O. Functions take `&DbPool` and typed args, return `Result<…>`. No `poem` types, no HTTP. |
+| **`services/`** | external HTTP clients | Talks to third-party APIs (Stripe today; add a file per new vendor). No DB. |
 
-Before claiming any Rust change is complete, run `cargo check --workspace` (or `cargo check -p <crate>` for a single crate). Type-checking is fast and catches the API-mismatch errors that are easy to introduce when writing against unfamiliar crates. Do not rely solely on inspection — always have the compiler verify.
+`llm/` and `tools/` are separate — the LLM client orchestrates rig agents and the tools embedded in them. Tools may take a `DbPool` (e.g. `HotelBookTool` logs issuing-card audit rows) but stay outside `api/`/`repos/`.
 
-## Rust tracing conventions
+### Adding a new HTTP endpoint
 
-Both crates have `tracing` + `tracing-subscriber` wired up. New Rust code must instrument itself from the start — runtime failures are otherwise invisible.
+1. Add or extend the relevant file under `repos/` for any new DB queries.
+2. Add the handler under `api/` — use the `AuthUser` extractor for authenticated routes that need the DB user row, or `Principal` for JWT-only.
+3. Register the route in `server::run` (only place that touches the route table).
+4. Return `ApiResult<T>` from handlers — let `?` propagate errors. Use `ApiError::{NotFound, BadRequest, Unavailable}` for caller-facing failures; everything else flows into `ApiError::Internal` via `From<anyhow::Error>` and gets logged at `error!` once by the `ResponseError` impl.
 
-**Subscriber setup (already done — reference only)**
-- `src-tauri`: initialised in `run()` via `tracing_subscriber::fmt().with_env_filter(...)`, default filter `silvie=debug`
-- `server`: initialised in `main.rs`, same pattern
-- Override at runtime: `RUST_LOG=silvie=debug,silvie_server=debug`
+### Adding a third-party integration on the desktop side
+
+`src-tauri/src/integrations/` is set up to grow. To add a new provider (e.g. Outlook):
+
+1. Create `integrations/<provider>.rs` with a `run()` function that returns `super::OAuthTokens`. Model it on `google.rs` — fixed loopback port, PKCE, system-browser open, captured redirect via `tauri_plugin_oauth`.
+2. Register the module in `integrations/mod.rs`.
+3. Add a `#[tauri::command]` wrapper in `src-tauri/src/lib.rs` and register it in the `invoke_handler!`.
+4. On the backend, extend `repos::integrations::fresh_access_token` with the provider's refresh logic and add a slug constant.
+5. Add the provider to the frontend `PROVIDERS` list in `src/lib/data/connectors.ts` and surface a connect/disconnect button in `src/lib/stores/connectors.svelte.ts`.
+
+### Frontend conventions
+
+- Components never call `fetch` or `invoke` directly — they go through `src/lib/services/*`. Each service has a matching store under `src/lib/stores/*.svelte.ts`.
+- Stores use Svelte 5 runes (`$state`, `$derived`). Reset state on logout from `auth.svelte.ts`.
+- SvelteKit runs with the **static adapter** — there is no SSR. The build output is a static bundle consumed by Tauri.
+
+## Tracing conventions
+
+Both crates have `tracing` + `tracing-subscriber` wired up:
+
+- `src-tauri`: initialized in `run()` (`lib.rs`), default filter `silvie=debug`.
+- `server`: initialized in `main()`, default filter `info,silvie_server=debug`.
+- Override at runtime: `RUST_LOG=silvie=debug,silvie_server=trace`.
 
 **Rules for new Rust code**
-- Add `#[instrument]` to every non-trivial `async fn`; use `skip(param)` for secrets and large types
-- Log entry of every Tauri command and HTTP handler at `info!`
-- HTTP calls: log URL + status at `debug!`; on **error** log the full response body at `error!`; on success body is `debug!` only (may be large)
-- Use `info!` for lifecycle milestones (server start, auth flow steps, keychain writes)
-- Use `debug!` for intermediate values useful during development
-- Use `warn!` for recoverable failures (timeouts, cancelled flows, retries)
-- Use `error!` for hard failures, always with the full error: `error!("thing failed: {e}")`
-- **Never log secret values** (tokens, API keys, passwords) — log lengths instead: `token_len = token.len()`
 
-See `src-tauri/src/auth.rs` for a reference implementation following all these rules.
+- Add `#[instrument]` to every non-trivial `async fn`; use `skip(param)` for secrets and large types.
+- Log entry of every Tauri command and HTTP handler at `info!`.
+- HTTP calls: log URL + status at `debug!`; on **error** log the full response body at `error!`; on success body is `debug!` only.
+- Use `info!` for lifecycle milestones (server start, auth flow steps, keychain writes).
+- Use `debug!` for intermediate values useful during development.
+- Use `warn!` for recoverable failures (timeouts, canceled flows, retries).
+- Use `error!` for hard failures, always with the full error chain: `error!("thing failed: {e:#}")`.
+- **Never log secret values** (tokens, API keys, passwords) — log lengths: `token_len = token.len()`.
 
-## Terraform
+Reference implementations: `src-tauri/src/integrations/google.rs` and `src-tauri/src/auth0/client.rs`.
 
-- NEVER apply the terraform code.
+## Verifying changes
+
+- **Rust**: run `cargo check --workspace` (or `cargo check -p <crate>`) before claiming any change complete. Type-checking is fast and catches the API-mismatch errors that are easy to introduce against unfamiliar crates.
+- **Frontend**: run `pnpm check`.
+- **End-to-end**: the Claude Code built-in preview tool **does not work with Tauri** — always ask the user to test manually with `pnpm tauri dev` (full desktop app) or `pnpm dev` (browser-only frontend at `http://localhost:5173`). Do not attempt to use the preview tool or take automated screenshots.
+
+## Database
+
+- Single Postgres instance, schema managed exclusively by Diesel migrations in `server/migrations/`.
+- `diesel_migrations::embed_migrations!` bakes the SQL into the binary; `db::run_pending_migrations` runs them at every server start (single-replica assumption — revisit when deploying multi-replica).
+- After editing migrations, regenerate `server/src/schema.rs` with `diesel print-schema`.
+- Repo functions (under `repos/`) own all SQL — keep `diesel::*` imports out of `api/`.
+
+## Auth
+
+- Identity provider: **Auth0**. The desktop client runs three flows: password grant (in-app form), browser PKCE (Universal Login / social), and `dbconnections/signup`.
+- Tokens live in the **OS keychain** (`src-tauri/src/auth0/keychain.rs`). The backend never sees the refresh token — it only validates incoming JWTs.
+- Backend validates JWTs by fetching JWKS once and caching by `kid` (`server/src/auth/jwt.rs`). Cache miss triggers a single refetch.
+- Two extractors: `Principal` (JWT only, for endpoints like `POST /users` that create the row) and `AuthUser` (JWT + DB user row). Default to `AuthUser`.
+- DB is the source of truth for user data — Auth0-side changes are **not** synced back (no webhooks yet). Email/name captured at signup is what the app uses forever.
 
 ## Data encryption policy
 
-- **No client-side / application-level encryption (no KMS envelope encryption).**
-  Earlier drafts of the schema marked sensitive fields (passport numbers, OAuth
-  tokens) as KMS-encrypted via a per-user DEK. That was dropped to reduce
-  complexity. We rely on:
-  - **Postgres encryption-at-rest** in production (RDS / Cloud SQL / Aurora —
-    enabled by default on managed offerings).
+- **No client-side / application-level encryption (no KMS envelope encryption).** Earlier drafts of the schema marked sensitive fields (passport numbers, OAuth tokens) as KMS-encrypted via a per-user DEK. That was dropped to reduce complexity. We rely on:
+  - **Postgres encryption-at-rest** in production (RDS / Cloud SQL / Aurora — enabled by default on managed offerings).
   - **TLS in transit** between client ↔ server ↔ database.
-  - **OS keychain** for any secrets the desktop client must hold (Auth0
-    refresh tokens, Google OAuth tokens).
-- Revisit this only if compliance requirements appear (e.g., a customer
-  contractually requires application-level encryption) or we add a new
-  category of secret materially more sensitive than what's already stored.
+  - **OS keychain** for any secrets the desktop client must hold (Auth0 access + refresh tokens).
+- Provider OAuth tokens (Google access + refresh) are stored in the backend `integrations` table — **not** on the desktop. The Tauri side returns the initial tokens from the OAuth handshake and forgets them.
+- Stripe Issuing PAN/CVV: lives in memory only for the duration of a booking request — never logged or persisted.
+- Revisit only if compliance requirements appear (e.g., a customer contractually requires application-level encryption) or we add a new category of secret materially more sensitive.
 
-## Conventions
+## Terraform
 
-- SvelteKit static adapter — no server-side rendering; the build output is a static bundle consumed by Tauri.
-- The `server/` crate is the LLM proxy. It exposes `POST /chat` (SSE) and `GET /health`. Provider/agent logic stays in `server/src/llm.rs`; the rest of the server is provider-agnostic.
-- Rust **Tauri** commands exposed to the frontend go in `src-tauri/src/lib.rs` and are registered in the `tauri::Builder`. Don't put model/LLM logic here — that belongs in `server/`.
-- The frontend talks to the backend through `src/lib/services/chat.ts` (streaming) — components never `fetch` directly.
-- Keep concerns cleanly separated: UI logic in `src/`, OS/system integrations in `src-tauri/`, AI/network in `server/`.
+- **NEVER apply the Terraform code.** Plans/reviews only.
+- Auth0 tenant config lives in `infra/terraform/auth0/`. AWS infra in `infra/terraform/aws/`.
+
+## Conventions (summary)
+
+- **Server module layers**: `api/` (HTTP) → `repos/` (DB) → `services/` (external HTTP). Don't cross the streams.
+- **Tauri commands** live in `src-tauri/src/lib.rs` and delegate to feature modules (`auth0/`, `integrations/`). Don't put model/LLM logic in the Tauri crate — that belongs in `server/`.
+- **Frontend** components consume stores; stores consume services; services own the network. No `fetch`/`invoke` in components.
+- **Env vars** are read in exactly one place per crate (`server/src/config.rs`, `src-tauri/src/config.rs`). Anything that needs config takes it via parameter, not `env::var`.
+- **One feature per migration** — don't pile unrelated tables into a single SQL file.
