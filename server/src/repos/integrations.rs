@@ -20,9 +20,9 @@ use uuid::Uuid;
 
 use crate::{db::DbPool, schema::integrations};
 
-/// Provider slug for Google Calendar — kept here so other modules don't
-/// hard-code it.
-pub const GOOGLE_CALENDAR_PROVIDER: &str = "google_calendar";
+/// Provider slug for the unified Google integration (Gmail + Calendar).
+/// Kept here so other modules don't hard-code it.
+pub const GOOGLE_PROVIDER: &str = "google";
 
 /// Runtime credentials needed to refresh OAuth tokens for each provider.
 /// Today only Google is wired up; new providers add fields here.
@@ -317,7 +317,7 @@ pub async fn fresh_access_token(
     };
 
     let refreshed = match provider {
-        "google_calendar" | "google_gmail" | "google_drive" => {
+        GOOGLE_PROVIDER => {
             cfg.ensure_google()?;
             refresh_google_token(
                 &cfg.google_client_id,

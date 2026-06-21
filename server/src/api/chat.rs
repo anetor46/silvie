@@ -21,7 +21,7 @@ use crate::{
     llm::{ChatTurn, LlmClient, LocaleContext, StripePaymentRefs, ToolAuth},
     repos::{
         conversations,
-        integrations::{self, IntegrationsConfig, GOOGLE_CALENDAR_PROVIDER},
+        integrations::{self, IntegrationsConfig, GOOGLE_PROVIDER},
         payments,
     },
     types::{ChatMessage, ChatRequest, Role, SseEvent},
@@ -78,7 +78,7 @@ pub async fn chat_handler(
         pool,
         integ_cfg,
         auth.user.id,
-        GOOGLE_CALENDAR_PROVIDER,
+        GOOGLE_PROVIDER,
     )
     .await
     .inspect_err(|e| error!("failed to fetch Google access token: {e:#}"))

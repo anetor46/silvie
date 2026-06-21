@@ -1,9 +1,9 @@
-mod auth;
 mod auth0;
 mod config;
+mod integrations;
 
-use auth::OAuthTokens;
 use auth0::AuthUser;
+use integrations::OAuthTokens;
 use tauri::State;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -14,7 +14,7 @@ async fn start_google_oauth(
     app: tauri::AppHandle,
     config: State<'_, GoogleOAuthConfig>,
 ) -> Result<OAuthTokens, String> {
-    auth::google_oauth_flow(&app, &config.client_id, &config.client_secret)
+    integrations::google::run(&app, &config.client_id, &config.client_secret)
         .await
         .map_err(|e| format!("{e:#}"))
 }

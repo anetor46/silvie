@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CATEGORIES } from '$lib/data/connectors';
+  import { PROVIDERS } from '$lib/data/connectors';
   import ConnectorCard from '$lib/components/ConnectorCard.svelte';
   import { connectors } from '$lib/stores/connectors.svelte';
 
@@ -14,27 +14,20 @@
     <p class="subtitle">Link Silvie to your tools so it can keep everything in sync.</p>
   </div>
 
-  <div class="categories">
-    {#each CATEGORIES as category (category.id)}
-      <section class="category">
-        <h2 class="category-label">{category.label}</h2>
-        <div class="provider-list">
-          {#each category.providers as provider (provider.id)}
-            {#if provider.id === 'google-calendar'}
-              <ConnectorCard
-                {provider}
-                connectedEmail={connectors.googleCalendar?.provider_account_email ?? null}
-                loading={connectors.googleCalendarLoading}
-                error={connectors.googleCalendarError}
-                onConnect={() => connectors.connectGoogleCalendar()}
-                onDisconnect={() => connectors.disconnectGoogleCalendar()}
-              />
-            {:else}
-              <ConnectorCard {provider} />
-            {/if}
-          {/each}
-        </div>
-      </section>
+  <div class="provider-list">
+    {#each PROVIDERS as provider (provider.id)}
+      {#if provider.id === 'google'}
+        <ConnectorCard
+          {provider}
+          connectedEmail={connectors.google?.provider_account_email ?? null}
+          loading={connectors.googleLoading}
+          error={connectors.googleError}
+          onConnect={() => connectors.connectGoogle()}
+          onDisconnect={() => connectors.disconnectGoogle()}
+        />
+      {:else}
+        <ConnectorCard {provider} />
+      {/if}
     {/each}
   </div>
 </div>
@@ -77,25 +70,10 @@
     color: var(--text-secondary);
   }
 
-  .categories {
-    display: flex;
-    flex-direction: column;
-    gap: 32px;
-    max-width: 600px;
-  }
-
-  .category-label {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--purple-600);
-    margin-bottom: 10px;
-  }
-
   .provider-list {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    max-width: 600px;
   }
 </style>

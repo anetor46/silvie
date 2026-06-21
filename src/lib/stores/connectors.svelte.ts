@@ -1,6 +1,6 @@
 import {
   deleteIntegration,
-  GOOGLE_CALENDAR_PROVIDER,
+  GOOGLE_PROVIDER,
   listIntegrations,
   saveIntegration,
   startGoogleOAuth,
@@ -8,17 +8,16 @@ import {
 } from '$lib/services/connectors';
 
 class ConnectorStore {
-  /** Connected Google Calendar integration row, if any. */
-  googleCalendar = $state<IntegrationView | null>(null);
-  googleCalendarLoading = $state(false);
-  googleCalendarError = $state<string | null>(null);
+  /** Connected Google integration (Gmail + Calendar) row, if any. */
+  google = $state<IntegrationView | null>(null);
+  googleLoading = $state(false);
+  googleError = $state<string | null>(null);
   loaded = $state(false);
 
   async load(): Promise<void> {
     try {
       const all = await listIntegrations();
-      this.googleCalendar =
-        all.find((i) => i.provider === GOOGLE_CALENDAR_PROVIDER) ?? null;
+      this.google = all.find((i) => i.provider === GOOGLE_PROVIDER) ?? null;
     } catch (e) {
       // Soft-fail on load — keeps the UI usable when offline / backend down.
       console.error('[connectors.load]', e);
@@ -27,15 +26,15 @@ class ConnectorStore {
     }
   }
 
-  async connectGoogleCalendar(): Promise<void> {
-    this.googleCalendarLoading = true;
-    this.googleCalendarError = null;
+  async connectGoogle(): Promise<void> {
+    this.googleLoading = true;
+    this.googleError = null;
     try {
       // 1. Tauri side: open browser, run OAuth, return tokens.
       const tokens = await startGoogleOAuth();
       // 2. Persist on the backend.
-      this.googleCalendar = await saveIntegration({
-        provider: GOOGLE_CALENDAR_PROVIDER,
+      this.google = await saveIntegration({
+        provider: GOOGLE_PROVIDER,
         provider_account_id: tokens.provider_account_id,
         provider_account_email: tokens.email,
         access_token: tokens.access_token,
@@ -44,30 +43,30 @@ class ConnectorStore {
         scopes: tokens.scopes,
       });
     } catch (e) {
-      this.googleCalendarError = e instanceof Error ? e.message : String(e);
+      this.googleError = e instanceof Error ? e.message : String(e);
     } finally {
-      this.googleCalendarLoading = false;
+      this.googleLoading = false;
     }
   }
 
-  async disconnectGoogleCalendar(): Promise<void> {
-    if (!this.googleCalendar) return;
-    this.googleCalendarLoading = true;
-    this.googleCalendarError = null;
+  async disconnectGoogle(): Promise<void> {
+    if (!this.google) return;
+    this.googleLoading = true;
+    this.googleError = null;
     try {
-      await deleteIntegration(this.googleCalendar.id);
-      this.googleCalendar = null;
+      await deleteIntegration(this.google.id);
+      this.google = null;
     } catch (e) {
-      this.googleCalendarError = e instanceof Error ? e.message : String(e);
+      this.googleError = e instanceof Error ? e.message : String(e);
     } finally {
-      this.googleCalendarLoading = false;
+      this.googleLoading = false;
     }
   }
 
   reset(): void {
-    this.googleCalendar = null;
+    this.google = null;
     this.loaded = false;
-    this.googleCalendarError = null;
+    this.googleError = null;
   }
 }
 

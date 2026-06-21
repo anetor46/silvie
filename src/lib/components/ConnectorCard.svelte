@@ -50,6 +50,8 @@
     <span class="provider-name">{provider.name}</span>
     {#if isConnected && connectedEmail}
       <span class="provider-email">{connectedEmail}</span>
+    {:else if provider.features.length > 0}
+      <span class="provider-features">{provider.features.join(' · ')}</span>
     {/if}
   </div>
 
@@ -131,6 +133,11 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .provider-features {
+    font-size: 12px;
+    color: var(--text-muted);
   }
 
   .status-dot {

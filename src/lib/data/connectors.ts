@@ -1,32 +1,27 @@
 export interface Provider {
   id: string;
   name: string;
+  /** Sub-capabilities included in this single OAuth connection. */
+  features: string[];
   color: string;
   textColor?: string;
   requiresOAuth?: boolean;
 }
 
-export interface ConnectorCategory {
-  id: string;
-  label: string;
-  providers: Provider[];
-}
-
-export const CATEGORIES: ConnectorCategory[] = [
+export const PROVIDERS: Provider[] = [
   {
-    id: 'email',
-    label: 'Email',
-    providers: [
-      { id: 'gmail', name: 'Gmail', color: '#EA4335', textColor: '#ffffff' },
-      { id: 'outlook-mail', name: 'Outlook', color: '#0078D4', textColor: '#ffffff' },
-    ],
+    id: 'google',
+    name: 'Google',
+    features: ['Gmail', 'Calendar'],
+    color: '#4285F4',
+    textColor: '#ffffff',
+    requiresOAuth: true,
   },
   {
-    id: 'calendar',
-    label: 'Calendar',
-    providers: [
-      { id: 'google-calendar', name: 'Google Calendar', color: '#4285F4', textColor: '#ffffff', requiresOAuth: true },
-      { id: 'outlook-calendar', name: 'Outlook Calendar', color: '#0078D4', textColor: '#ffffff' },
-    ],
+    id: 'outlook',
+    name: 'Outlook',
+    features: ['Mail', 'Calendar'],
+    color: '#0078D4',
+    textColor: '#ffffff',
   },
 ];

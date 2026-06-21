@@ -1,54 +1,43 @@
-//! Google OAuth handshake. We only own the browser-side ceremony here — once
-//! the user grants consent and we have a code, we exchange it for tokens and
-//! return them to the frontend. Persistence (and refresh) happens on the
-//! backend via the `integrations` table; this module never touches the keychain.
+//! Google OAuth handshake. Single integration covering both Gmail and Google
+//! Calendar — all scopes are requested in one consent screen so the user only
+//! authenticates once.
 
 use anyhow::{anyhow, Context, Result};
 use oauth2::{
     basic::BasicClient, url::Url, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     PkceCodeChallenge, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::AppHandle;
 use tauri_plugin_oauth::OauthConfig;
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, instrument, warn};
 
-/// Fixed loopback port for the Google Calendar OAuth callback.
-/// Must be registered in Google Cloud Console as an authorized redirect URI:
-///   http://127.0.0.1:1422
+use super::OAuthTokens;
+
+/// Fixed loopback port for the Google OAuth callback. Must be registered in
+/// Google Cloud Console as an authorized redirect URI: `http://127.0.0.1:1422`.
 /// Using a fixed port lets us use a Web application client (which requires
 /// exact URI matching) rather than a Desktop app client.
-const GOOGLE_OAUTH_PORT: u16 = 1422;
+const OAUTH_PORT: u16 = 1422;
 
-/// Tokens returned to the frontend after a successful OAuth dance. The frontend
-/// forwards these to `POST /users/me/integrations` so the backend takes over
-/// storage + refresh.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OAuthTokens {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    /// Seconds until the access token expires.
-    pub expires_in: Option<i64>,
-    /// Google's stable subject identifier — used as `provider_account_id`.
-    pub provider_account_id: String,
-    pub email: String,
-    pub scopes: Vec<String>,
-}
-
-/// Parsed fields from the Google `/userinfo` endpoint.
-struct GoogleUserInfo {
-    sub: String,
-    email: String,
-}
+/// All scopes requested on connect. We ask for the full set up-front so the
+/// user only sees one consent screen for the combined Gmail + Calendar
+/// integration.
+const SCOPES: &[&str] = &[
+    // Identity (for `sub` + `email` in /userinfo).
+    "openid",
+    "email",
+    "profile",
+    // Calendar: full read/write on events and calendars.
+    "https://www.googleapis.com/auth/calendar",
+    // Gmail: full mailbox access (read, send, modify, delete).
+    "https://mail.google.com/",
+];
 
 #[instrument(skip(app, client_secret))]
-pub async fn google_oauth_flow(
-    app: &AppHandle,
-    client_id: &str,
-    client_secret: &str,
-) -> Result<OAuthTokens> {
+pub async fn run(app: &AppHandle, client_id: &str, client_secret: &str) -> Result<OAuthTokens> {
     info!("starting Google OAuth flow");
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
@@ -56,7 +45,7 @@ pub async fn google_oauth_flow(
 
     let port = tauri_plugin_oauth::start_with_config(
         OauthConfig {
-            ports: Some(vec![GOOGLE_OAUTH_PORT]),
+            ports: Some(vec![OAUTH_PORT]),
             response: None,
         },
         move |url| {
@@ -68,7 +57,7 @@ pub async fn google_oauth_flow(
             }
         },
     )
-    .map_err(|e| anyhow!("Failed to start OAuth server on port {GOOGLE_OAUTH_PORT}: {e}"))?;
+    .map_err(|e| anyhow!("Failed to start OAuth server on port {OAUTH_PORT}: {e}"))?;
     info!("loopback server started on port {port}");
 
     let http_client = reqwest::ClientBuilder::new()
@@ -87,16 +76,11 @@ pub async fn google_oauth_flow(
                 .context("Invalid token URL")?,
         )
         .set_redirect_uri(
-            RedirectUrl::new(format!("http://127.0.0.1:{GOOGLE_OAUTH_PORT}"))
+            RedirectUrl::new(format!("http://127.0.0.1:{OAUTH_PORT}"))
                 .context("Invalid redirect URL")?,
         );
 
-    let calendar_scope = "https://www.googleapis.com/auth/calendar.events".to_string();
-    let scopes = vec![
-        calendar_scope.clone(),
-        "email".to_string(),
-        "profile".to_string(),
-    ];
+    let scopes: Vec<String> = SCOPES.iter().map(|s| (*s).to_string()).collect();
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let mut auth = client.authorize_url(CsrfToken::new_random);
@@ -192,8 +176,16 @@ pub async fn google_oauth_flow(
     })
 }
 
+struct GoogleUserInfo {
+    sub: String,
+    email: String,
+}
+
 #[instrument(skip(access_token))]
 async fn fetch_userinfo(access_token: &str) -> Result<GoogleUserInfo> {
+    // OpenID Connect userinfo endpoint — returns `sub` (stable subject id).
+    // The legacy `/oauth2/v2/userinfo` returns `id` instead, which is why
+    // we use the OIDC one here.
     const USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
 
     #[derive(Deserialize)]

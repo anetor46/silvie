@@ -135,11 +135,11 @@ export async function getProviderAccessToken(provider: string): Promise<string |
   return json.access_token;
 }
 
-// ── Convenience: Google Calendar ────────────────────────────────────────────
+// ── Convenience: Google (Gmail + Calendar) ──────────────────────────────────
 
-export const GOOGLE_CALENDAR_PROVIDER = 'google_calendar';
+export const GOOGLE_PROVIDER = 'google';
 
 export async function getGoogleAccessToken(): Promise<string | null> {
   if (!isTauri()) return null;
-  return getProviderAccessToken(GOOGLE_CALENDAR_PROVIDER);
+  return getProviderAccessToken(GOOGLE_PROVIDER);
 }
