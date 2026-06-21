@@ -29,7 +29,7 @@ impl HotelSearchTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HotelSearchArgs {
     /// IATA city code, e.g. "PAR" for Paris, "LON" for London.
     pub destination: String,

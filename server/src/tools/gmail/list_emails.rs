@@ -24,7 +24,7 @@ impl ListEmailsTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ListEmailsArgs {
     /// Gmail search query (e.g. "is:unread from:boss@company.com").
     pub query: Option<String>,

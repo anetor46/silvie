@@ -1,6 +1,6 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use super::common::{extract_plain_text, header_value, ApiMessage, EmailFull, GMAIL_BASE};
@@ -23,7 +23,7 @@ impl GetEmailTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GetEmailArgs {
     /// Gmail message ID (from `list_emails`).
     pub message_id: String,

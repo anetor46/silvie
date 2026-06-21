@@ -23,7 +23,7 @@ impl GoogleCalendarTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CalendarArgs {
     pub start_time: Option<String>,
     pub end_time: Option<String>,

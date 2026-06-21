@@ -21,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::auth::JwtValidator;
 use crate::config::Config;
-use crate::llm::LlmClient;
+use crate::llm::{ConfirmationRegistry, LlmClient};
 use crate::repos::integrations::IntegrationsConfig;
 use crate::server::ServerState;
 use crate::settings::Settings;
@@ -67,9 +67,19 @@ async fn main() -> Result<()> {
 
     let integrations_config = Arc::new(IntegrationsConfig::from(&config));
 
+    // Shared between the chat stream task (which registers pending entries
+    // when write tools fire) and the /chat/confirmations endpoint (which
+    // resolves them when the user clicks Approve / Reject).
+    let confirmation_registry = Arc::new(ConfirmationRegistry::new());
+
     let llm = Arc::new(
-        LlmClient::new(&config.gemini_api_key, &config, pool.clone())
-            .context("failed to initialise LLM client")?,
+        LlmClient::new(
+            &config.gemini_api_key,
+            &config,
+            pool.clone(),
+            confirmation_registry.clone(),
+        )
+        .context("failed to initialise LLM client")?,
     );
 
     server::run(ServerState {
@@ -80,6 +90,7 @@ async fn main() -> Result<()> {
         jwt_validator,
         integrations_config,
         stripe_secret_key: config.stripe.as_ref().map(|s| s.secret_key.clone()),
+        confirmation_registry,
     })
     .await
     .context("server failed")?;

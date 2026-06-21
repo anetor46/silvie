@@ -46,7 +46,7 @@ impl HotelBookTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HotelBookArgs {
     /// Hotel property ID from hotel_search results.
     pub hotel_id: String,

@@ -20,11 +20,11 @@ use crate::{
     error::{ApiError, ApiResult, ResultOptionExt},
     llm::{ChatTurn, LlmClient, LocaleContext, StripePaymentRefs, ToolAuth},
     repos::{
-        conversations,
+        conversations::{self, ToolMessageContent},
         integrations::{self, IntegrationsConfig, GOOGLE_PROVIDER},
         payments,
     },
-    types::{ChatMessage, ChatRequest, Role, SseEvent},
+    types::{ChatEvent, ChatMessage, ChatRequest, Role, SseEvent},
 };
 
 fn friendly_error_message(e: &Error) -> String {
@@ -62,8 +62,7 @@ pub async fn chat_handler(
         .await
         .into_required()?;
 
-    // 2. Persist the user message immediately. Failure here is fatal — we
-    //    don't want to call the LLM without recording the prompt.
+    // 2. Persist the user message immediately.
     conversations::insert_user_message(pool, convo.id, &req.content)
         .await
         .map_err(ApiError::from)?;
@@ -106,15 +105,14 @@ pub async fn chat_handler(
                 "user" => Role::User,
                 "assistant" => Role::Assistant,
                 "system" => Role::System,
-                _ => return None, // skip 'tool' rows — Gemini handles tools out-of-band
+                // 'tool' rows are filtered out — they're frontend visualization
+                // only; rig handles tool round-trips within a single agent stream.
+                _ => return None,
             };
             Some(ChatMessage { role, content: m.content })
         })
         .collect();
 
-    // 6. Spawn the LLM stream. Collect chunks into `full_response` so we can
-    //    persist the assistant message at the end — regardless of whether
-    //    the client stays connected (closing fetch shouldn't lose the reply).
     let client = client.clone();
     let pool_for_save = pool.clone();
     let convo_id = convo.id;
@@ -133,58 +131,148 @@ pub async fn chat_handler(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseEvent>();
 
     tokio::spawn(async move {
-        let mut full_response = String::new();
+        // Buffer of assistant text emitted between tool calls. Flushed
+        // (as one row) when a tool call arrives, and again at stream end.
+        let mut text_buffer = String::new();
         let mut client_disconnected = false;
+
+        // Helper: emit an SSE event if the client is still connected.
+        let send = |ev: SseEvent, disconnected: &mut bool| {
+            if !*disconnected && tx.send(ev).is_err() {
+                *disconnected = true;
+            }
+        };
+
+        // Helper: persist the current text buffer as one assistant row.
+        async fn flush_text(
+            buffer: &mut String,
+            pool: &DbPool,
+            convo_id: uuid::Uuid,
+        ) {
+            if buffer.is_empty() {
+                return;
+            }
+            let to_save = std::mem::take(buffer);
+            if let Err(e) =
+                conversations::insert_assistant_message(pool, convo_id, &to_save).await
+            {
+                error!("failed to persist assistant message segment: {e:#}");
+            }
+        }
 
         match client.stream(turn).await {
             Ok(mut stream) => {
                 while let Some(item) = stream.next().await {
                     match item {
-                        Ok(chunk) if chunk.is_empty() => continue,
-                        Ok(chunk) => {
-                            full_response.push_str(&chunk);
-                            if !client_disconnected
-                                && tx.send(SseEvent::Token { text: chunk }).is_err()
+                        Ok(ChatEvent::Text(chunk)) if chunk.is_empty() => continue,
+                        Ok(ChatEvent::Text(chunk)) => {
+                            text_buffer.push_str(&chunk);
+                            send(SseEvent::Token { text: chunk }, &mut client_disconnected);
+                        }
+                        Ok(ChatEvent::ToolCall {
+                            call_id,
+                            name,
+                            args,
+                            requires_confirmation,
+                        }) => {
+                            // Flush any accumulated assistant text first so
+                            // row ordering reflects interleaving.
+                            flush_text(&mut text_buffer, &pool_for_save, convo_id).await;
+
+                            let status = if requires_confirmation {
+                                "pending_user"
+                            } else {
+                                "running"
+                            };
+                            let payload = ToolMessageContent {
+                                args: args.clone(),
+                                requires_confirmation,
+                                status: status.into(),
+                                summary: None,
+                                success: None,
+                            };
+                            if let Err(e) = conversations::upsert_tool_call(
+                                &pool_for_save,
+                                convo_id,
+                                &call_id,
+                                &name,
+                                &payload,
+                            )
+                            .await
                             {
-                                debug!("client disconnected mid-stream — continuing to collect for DB save");
-                                client_disconnected = true;
+                                error!("failed to persist tool_call row: {e:#}");
                             }
+                            send(
+                                SseEvent::ToolCall {
+                                    call_id,
+                                    name,
+                                    args,
+                                    requires_confirmation,
+                                },
+                                &mut client_disconnected,
+                            );
+                        }
+                        Ok(ChatEvent::ToolResult {
+                            call_id,
+                            success,
+                            summary,
+                        }) => {
+                            // The args/name/requires_confirmation fields stay
+                            // as recorded by the prior ToolCall row — we
+                            // reload, mutate, and re-save.
+                            let updated = load_and_update_tool_status(
+                                &pool_for_save,
+                                convo_id,
+                                &call_id,
+                                success,
+                                summary.clone(),
+                            )
+                            .await;
+                            if let Err(e) = updated {
+                                error!("failed to update tool_call row: {e:#}");
+                            }
+                            send(
+                                SseEvent::ToolResult {
+                                    call_id,
+                                    success,
+                                    summary,
+                                },
+                                &mut client_disconnected,
+                            );
                         }
                         Err(e) => {
                             error!("model stream error: {e:#}");
                             let friendly = friendly_error_message(&e);
-                            full_response.push_str(&friendly);
-                            if !client_disconnected {
-                                let _ = tx.send(SseEvent::Token { text: friendly });
-                                let _ = tx.send(SseEvent::Done);
-                            }
+                            text_buffer.push_str(&friendly);
+                            send(
+                                SseEvent::Token {
+                                    text: friendly,
+                                },
+                                &mut client_disconnected,
+                            );
+                            send(SseEvent::Done, &mut client_disconnected);
                             break;
                         }
                     }
                 }
-                if !client_disconnected {
-                    let _ = tx.send(SseEvent::Done);
-                }
+                send(SseEvent::Done, &mut client_disconnected);
             }
             Err(e) => {
                 error!("failed to start chat stream: {e:#}");
                 let fallback =
                     "I encountered an issue getting ready to respond. Please try again."
                         .to_string();
-                full_response.push_str(&fallback);
-                let _ = tx.send(SseEvent::Token { text: fallback });
-                let _ = tx.send(SseEvent::Done);
+                text_buffer.push_str(&fallback);
+                send(
+                    SseEvent::Token { text: fallback },
+                    &mut client_disconnected,
+                );
+                send(SseEvent::Done, &mut client_disconnected);
             }
         }
 
-        if !full_response.is_empty() {
-            if let Err(e) =
-                conversations::insert_assistant_message(&pool_for_save, convo_id, &full_response)
-                    .await
-            {
-                error!("failed to persist assistant message: {e:#}");
-            }
-        }
+        // Final flush of any trailing assistant text.
+        flush_text(&mut text_buffer, &pool_for_save, convo_id).await;
     });
 
     let event_stream = UnboundedReceiverStream::new(rx).map(|ev| {
@@ -195,4 +283,61 @@ pub async fn chat_handler(
     });
 
     Ok(SSE::new(event_stream).keep_alive(std::time::Duration::from_secs(15)))
+}
+
+/// Re-read the tool row's stored content, merge new result fields, save.
+/// Done in the chat handler (rather than the repo) since the repo's upsert
+/// helper is generic; this is the result-specific mutation pattern.
+async fn load_and_update_tool_status(
+    pool: &DbPool,
+    conv_id: uuid::Uuid,
+    call_id: &str,
+    success: bool,
+    summary: Option<String>,
+) -> anyhow::Result<()> {
+    use crate::schema::messages;
+    use diesel::{ExpressionMethods, OptionalExtension, QueryDsl};
+    use diesel_async::RunQueryDsl;
+
+    let mut conn = pool.get().await?;
+    let existing: Option<(String, Option<String>)> = messages::table
+        .filter(messages::conversation_id.eq(conv_id))
+        .filter(messages::tool_call_id.eq(call_id))
+        .select((messages::content, messages::tool_name))
+        .first(&mut conn)
+        .await
+        .optional()?;
+
+    let Some((content, tool_name)) = existing else {
+        // No prior ToolCall row was persisted — synthesise a minimal one.
+        let payload = ToolMessageContent {
+            args: serde_json::Value::Null,
+            requires_confirmation: false,
+            status: if success { "success".into() } else { "error".into() },
+            summary,
+            success: Some(success),
+        };
+        return conversations::upsert_tool_call(pool, conv_id, call_id, "unknown", &payload)
+            .await
+            .map(|_| ());
+    };
+
+    let mut payload: ToolMessageContent =
+        serde_json::from_str(&content).unwrap_or(ToolMessageContent {
+            args: serde_json::Value::Null,
+            requires_confirmation: false,
+            status: "running".into(),
+            summary: None,
+            success: None,
+        });
+    payload.status = if success { "success".into() } else { "error".into() };
+    payload.success = Some(success);
+    if summary.is_some() {
+        payload.summary = summary;
+    }
+
+    let tool_name = tool_name.as_deref().unwrap_or("unknown");
+    conversations::upsert_tool_call(pool, conv_id, call_id, tool_name, &payload)
+        .await
+        .map(|_| ())
 }

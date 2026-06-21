@@ -69,6 +69,16 @@ struct NewMessage<'a> {
     content: &'a str,
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = messages)]
+struct NewToolMessage<'a> {
+    conversation_id: Uuid,
+    role: &'a str,
+    content: &'a str,
+    tool_name: &'a str,
+    tool_call_id: &'a str,
+}
+
 // ── Request / response shapes ───────────────────────────────────────────────
 
 #[derive(Serialize, Debug)]
@@ -293,6 +303,73 @@ fn generate_title(content: &str) -> String {
     let mut truncated: String = one_line.chars().take(AUTO_TITLE_MAX_LEN - 1).collect();
     truncated.push('…');
     truncated
+}
+
+/// Serialised JSON payload stored in `messages.content` for tool rows. The
+/// shape is shared with the frontend (`src/lib/types.ts ToolCallEntry`).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolMessageContent {
+    pub args: serde_json::Value,
+    pub requires_confirmation: bool,
+    pub status: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub success: Option<bool>,
+}
+
+/// Insert (or update) a tool row keyed by `tool_call_id`. The first call
+/// per call_id INSERTs with `status = pending_user|running`; subsequent
+/// calls UPDATE the JSON content with the new status / summary. Returns
+/// the row id.
+pub async fn upsert_tool_call(
+    pool: &DbPool,
+    conv_id: Uuid,
+    call_id: &str,
+    tool_name: &str,
+    payload: &ToolMessageContent,
+) -> Result<Uuid> {
+    let mut conn = pool.get().await.context("Failed to get DB connection")?;
+    let content_json =
+        serde_json::to_string(payload).context("Failed to serialise tool message content")?;
+
+    // Check if a row already exists for this tool_call_id.
+    let existing: Option<Uuid> = messages::table
+        .filter(messages::conversation_id.eq(conv_id))
+        .filter(messages::tool_call_id.eq(call_id))
+        .select(messages::id)
+        .first(&mut conn)
+        .await
+        .optional()
+        .context("Failed to look up existing tool row")?;
+
+    if let Some(id) = existing {
+        diesel::update(messages::table.filter(messages::id.eq(id)))
+            .set(messages::content.eq(&content_json))
+            .execute(&mut conn)
+            .await
+            .context("Failed to update tool row")?;
+        Ok(id)
+    } else {
+        let row: Message = diesel::insert_into(messages::table)
+            .values(NewToolMessage {
+                conversation_id: conv_id,
+                role: "tool",
+                content: &content_json,
+                tool_name,
+                tool_call_id: call_id,
+            })
+            .returning(Message::as_returning())
+            .get_result(&mut conn)
+            .await
+            .context("Failed to insert tool row")?;
+        let _: usize = diesel::update(conversations::table.filter(conversations::id.eq(conv_id)))
+            .set(conversations::updated_at.eq(diesel::dsl::now))
+            .execute(&mut conn)
+            .await
+            .context("Failed to bump conversation updated_at")?;
+        Ok(row.id)
+    }
 }
 
 /// Load the full message history for a conversation, oldest first.

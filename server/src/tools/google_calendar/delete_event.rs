@@ -22,7 +22,7 @@ impl DeleteCalendarEventTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct DeleteEventArgs {
     pub event_id: String,
 }

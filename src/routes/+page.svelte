@@ -58,9 +58,19 @@
     const handle = streamChat(
       conversationId,
       text,
-      (chunk) => {
-        conversations.appendToAssistant(assistantId, chunk);
-        scrollToBottom();
+      {
+        onToken: (chunk) => {
+          conversations.appendToAssistant(assistantId, chunk);
+          scrollToBottom();
+        },
+        onToolCall: (call) => {
+          conversations.appendToolCall(call);
+          scrollToBottom();
+        },
+        onToolResult: (result) => {
+          conversations.updateToolResult(result.callId, result.success, result.summary);
+          scrollToBottom();
+        },
       },
       { timezone, currentDatetime },
     );

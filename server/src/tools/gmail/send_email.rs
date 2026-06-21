@@ -1,6 +1,6 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, instrument};
 
 use super::common::{build_raw_message, encode_base64url, ApiSendResponse, SentMessage, GMAIL_BASE};
@@ -22,7 +22,7 @@ impl SendEmailTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SendEmailArgs {
     /// One or more recipient email addresses.
     pub to: Vec<String>,

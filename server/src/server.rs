@@ -12,6 +12,7 @@ use tracing::info;
 use crate::{
     api::{
         chat::chat_handler,
+        confirmations::confirmation_handler,
         conversations::{
             create_conversation_handler, delete_conversation_handler, get_conversation_handler,
             list_conversations_handler, update_conversation_handler,
@@ -30,7 +31,7 @@ use crate::{
     },
     auth::JwtValidator,
     db::DbPool,
-    llm::LlmClient,
+    llm::{ConfirmationRegistry, LlmClient},
     repos::integrations::IntegrationsConfig,
     services::stripe::PaymentClient,
 };
@@ -44,6 +45,7 @@ pub struct ServerState {
     pub jwt_validator: Arc<JwtValidator>,
     pub integrations_config: Arc<IntegrationsConfig>,
     pub stripe_secret_key: Option<String>,
+    pub confirmation_registry: Arc<ConfirmationRegistry>,
 }
 
 #[handler]
@@ -60,6 +62,7 @@ pub async fn run(state: ServerState) -> Result<()> {
         jwt_validator,
         integrations_config,
         stripe_secret_key,
+        confirmation_registry,
     } = state;
 
     let payment: Arc<Option<PaymentClient>> = Arc::new(stripe_secret_key.map(PaymentClient::new));
@@ -78,6 +81,7 @@ pub async fn run(state: ServerState) -> Result<()> {
     let app = Route::new()
         .at("/health", get(health))
         .at("/chat", post(chat_handler))
+        .at("/chat/confirmations", post(confirmation_handler))
         .at("/payment/setup", post(payment_setup_handler))
         .at("/payment/method", post(payment_method_handler))
         .at("/users", post(create_user_handler))
@@ -120,6 +124,7 @@ pub async fn run(state: ServerState) -> Result<()> {
         .with(AddData::new(pool))
         .with(AddData::new(jwt_validator))
         .with(AddData::new(integrations_config))
+        .with(AddData::new(confirmation_registry))
         .with(cors);
 
     let addr = format!("{host}:{port}");

@@ -6,26 +6,67 @@ import {
   updateConversationTitle,
   type Conversation,
 } from '$lib/services/conversations';
-import type { Message } from '$lib/types';
+import type { Message, ToolCallEntry } from '$lib/types';
 
-/** Map a backend message row to the lighter view-model the UI works with. */
-function toUiMessage(m: { id: string; role: string; content: string }): Message | null {
-  if (m.role !== 'user' && m.role !== 'assistant') return null;
-  return { id: m.id, role: m.role, content: m.content };
+interface BackendMessage {
+  id: string;
+  role: string;
+  content: string;
+  tool_name?: string | null;
+  tool_call_id?: string | null;
+}
+
+interface StoredToolPayload {
+  args?: Record<string, unknown>;
+  requires_confirmation?: boolean;
+  status?: string;
+  summary?: string | null;
+  success?: boolean | null;
+}
+
+/** Map a backend message row to the UI view-model. Returns null for rows we
+ *  don't render (e.g. system rows that snuck in). For tool rows, parse the
+ *  JSON content payload into a `ToolCallEntry`. */
+function toUiMessage(m: BackendMessage): Message | null {
+  if (m.role === 'user' || m.role === 'assistant') {
+    return { id: m.id, role: m.role, content: m.content };
+  }
+  if (m.role === 'tool') {
+    let parsed: StoredToolPayload = {};
+    try {
+      parsed = JSON.parse(m.content) as StoredToolPayload;
+    } catch {
+      // fall through with empty parsed
+    }
+    const status = (parsed.status ?? 'success') as ToolCallEntry['status'];
+    const decision =
+      status === 'success' && parsed.requires_confirmation
+        ? 'approved'
+        : status === 'error' && parsed.requires_confirmation
+          ? 'rejected'
+          : undefined;
+    const toolCall: ToolCallEntry = {
+      callId: m.tool_call_id ?? m.id,
+      name: m.tool_name ?? 'unknown',
+      args: parsed.args ?? {},
+      requiresConfirmation: parsed.requires_confirmation ?? false,
+      status,
+      summary: parsed.summary ?? undefined,
+      decision,
+    };
+    return { id: m.id, role: 'tool', content: m.content, toolCall };
+  }
+  return null;
 }
 
 class ConversationsStore {
-  /** Sidebar list (most recent first). */
   list = $state<Conversation[]>([]);
   loaded = $state(false);
   error = $state<string | null>(null);
 
-  /** The currently-open conversation's id, or null if the user is in the
-   *  "new chat" empty state (no DB row created yet). */
   currentId = $state<string | null>(null);
   currentMessages = $state<Message[]>([]);
 
-  /** Convenience: the row from the sidebar list matching `currentId`. */
   get active(): Conversation | undefined {
     return this.list.find((c) => c.id === this.currentId);
   }
@@ -54,7 +95,7 @@ class ConversationsStore {
         return;
       }
       this.currentMessages = convo.messages
-        .map(toUiMessage)
+        .map((m) => toUiMessage(m as BackendMessage))
         .filter((m): m is Message => m !== null);
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
@@ -63,17 +104,12 @@ class ConversationsStore {
 
   // ── Composition flow ───────────────────────────────────────────────────
 
-  /** Reset to the "new chat" empty state — does NOT create a row yet. The
-   *  row is created lazily by `ensureConversation()` when the first message
-   *  is sent. */
   newChat(): void {
     this.currentId = null;
     this.currentMessages = [];
     this.error = null;
   }
 
-  /** Get the conversation id for the current chat, creating one on the
-   *  backend if there isn't one yet. */
   async ensureConversation(): Promise<string> {
     if (this.currentId) return this.currentId;
     const c = await createConversation();
@@ -89,8 +125,7 @@ class ConversationsStore {
     ];
   }
 
-  /** Append an empty assistant placeholder and return its temp id so the
-   *  caller can stream tokens into it via `appendToAssistant`. */
+  /** Append an empty assistant placeholder and return its temp id. */
   startAssistantMessage(): string {
     const id = crypto.randomUUID();
     this.currentMessages = [
@@ -103,10 +138,72 @@ class ConversationsStore {
   appendToAssistant(id: string, chunk: string): void {
     const idx = this.currentMessages.findIndex((m) => m.id === id);
     if (idx < 0) return;
-    // Replace the row immutably so the rune reacts.
     this.currentMessages = this.currentMessages.map((m, i) =>
       i === idx ? { ...m, content: m.content + chunk } : m,
     );
+  }
+
+  // ── Tool call streaming ────────────────────────────────────────────────
+
+  /** Append a new tool-call row in the running message list. The card
+   *  shows as a spinner (or "awaiting approval" badge if requiresConfirmation
+   *  is true) until a matching toolResult arrives. */
+  appendToolCall(entry: {
+    callId: string;
+    name: string;
+    args: Record<string, unknown>;
+    requiresConfirmation: boolean;
+  }): void {
+    const toolCall: ToolCallEntry = {
+      callId: entry.callId,
+      name: entry.name,
+      args: entry.args,
+      requiresConfirmation: entry.requiresConfirmation,
+      status: entry.requiresConfirmation ? 'pending_user' : 'running',
+    };
+    this.currentMessages = [
+      ...this.currentMessages,
+      {
+        id: crypto.randomUUID(),
+        role: 'tool',
+        content: '',
+        toolCall,
+      },
+    ];
+  }
+
+  /** Update the matching tool row's status / summary when the tool result
+   *  arrives. No-op if no matching row exists. */
+  updateToolResult(callId: string, success: boolean, summary: string | null): void {
+    this.currentMessages = this.currentMessages.map((m) => {
+      if (m.role !== 'tool' || m.toolCall?.callId !== callId) return m;
+      return {
+        ...m,
+        toolCall: {
+          ...m.toolCall!,
+          status: success ? 'success' : 'error',
+          summary: summary ?? m.toolCall!.summary,
+        },
+      };
+    });
+  }
+
+  /** Record the user's Approve / Reject click locally so the buttons
+   *  collapse into a badge while waiting for the tool to actually run. */
+  setDecision(callId: string, decision: 'approved' | 'rejected'): void {
+    this.currentMessages = this.currentMessages.map((m) => {
+      if (m.role !== 'tool' || m.toolCall?.callId !== callId) return m;
+      return {
+        ...m,
+        toolCall: {
+          ...m.toolCall!,
+          decision,
+          // Once approved, status transitions to running until the actual
+          // execution completes and the ToolResult event flips it again.
+          status: decision === 'approved' ? 'running' : 'error',
+        },
+      };
+    });
   }
 
   /** After the first send, the backend auto-titled this conversation. Pull

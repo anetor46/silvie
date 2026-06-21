@@ -25,7 +25,7 @@ impl FindFreeTimeTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct FindFreeTimeArgs {
     pub start_time: String,
     pub end_time: String,

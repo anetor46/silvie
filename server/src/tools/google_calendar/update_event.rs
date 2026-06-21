@@ -1,6 +1,6 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use super::common::{
@@ -53,7 +53,7 @@ impl UpdateCalendarEventTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct UpdateEventArgs {
     pub event_id: String,
     pub title: Option<String>,

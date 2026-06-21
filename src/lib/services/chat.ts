@@ -3,14 +3,13 @@
  * Server-Sent Events. Uses fetch + ReadableStream (not EventSource) so we can
  * POST the request body AND attach an Authorization header.
  *
- * Wire format (one frame per `data:` line, JSON-encoded payload):
+ * Wire format (one JSON payload per `data:` line, tagged with `type`):
  *   { "type": "token", "text": "<chunk>" }
+ *   { "type": "tool_call", "call_id": "...", "name": "...", "args": {...},
+ *     "requires_confirmation": false }
+ *   { "type": "tool_result", "call_id": "...", "success": true, "summary": null }
  *   { "type": "done" }
  *   { "type": "error", "message": "<msg>" }
- *
- * Server is authoritative for conversation history + integration tokens — the
- * client just sends the conversation id, the new user turn, and per-request
- * locale context (timezone / current datetime).
  */
 
 import { getAccessToken } from '$lib/services/auth';
@@ -24,6 +23,19 @@ export interface StreamHandle {
 
 type ServerEvent =
   | { type: 'token'; text: string }
+  | {
+      type: 'tool_call';
+      call_id: string;
+      name: string;
+      args: Record<string, unknown>;
+      requires_confirmation: boolean;
+    }
+  | {
+      type: 'tool_result';
+      call_id: string;
+      success: boolean;
+      summary: string | null;
+    }
   | { type: 'done' }
   | { type: 'error'; message: string };
 
@@ -35,10 +47,25 @@ export interface ChatOptions {
   currentDatetime?: string; // ISO 8601 with local offset
 }
 
+export interface ChatCallbacks {
+  onToken: (text: string) => void;
+  onToolCall: (call: {
+    callId: string;
+    name: string;
+    args: Record<string, unknown>;
+    requiresConfirmation: boolean;
+  }) => void;
+  onToolResult: (result: {
+    callId: string;
+    success: boolean;
+    summary: string | null;
+  }) => void;
+}
+
 export function streamChat(
   conversationId: string,
   content: string,
-  onToken: (text: string) => void,
+  callbacks: ChatCallbacks,
   opts?: ChatOptions,
 ): StreamHandle {
   const controller = new AbortController();
@@ -82,7 +109,6 @@ export function streamChat(
 
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE frames are separated by a blank line ("\n\n").
       let sep: number;
       while ((sep = buffer.indexOf('\n\n')) !== -1) {
         const rawFrame = buffer.slice(0, sep);
@@ -91,12 +117,29 @@ export function streamChat(
         const event = parseFrame(rawFrame);
         if (!event) continue;
 
-        if (event.type === 'token') {
-          onToken(event.text);
-        } else if (event.type === 'done') {
-          return;
-        } else if (event.type === 'error') {
-          throw new Error(event.message);
+        switch (event.type) {
+          case 'token':
+            callbacks.onToken(event.text);
+            break;
+          case 'tool_call':
+            callbacks.onToolCall({
+              callId: event.call_id,
+              name: event.name,
+              args: event.args,
+              requiresConfirmation: event.requires_confirmation,
+            });
+            break;
+          case 'tool_result':
+            callbacks.onToolResult({
+              callId: event.call_id,
+              success: event.success,
+              summary: event.summary,
+            });
+            break;
+          case 'done':
+            return;
+          case 'error':
+            throw new Error(event.message);
         }
       }
     }
@@ -112,7 +155,6 @@ export function streamChat(
 function parseFrame(frame: string): ServerEvent | null {
   const dataLines: string[] = [];
   for (const line of frame.split('\n')) {
-    // Comments (lines starting with ":") and other field names (id:, event:, retry:) are ignored.
     if (line.startsWith('data:')) {
       dataLines.push(line.slice(5).trim());
     }

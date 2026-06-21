@@ -22,7 +22,7 @@ impl RespondToEventTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RespondArgs {
     pub event_id: String,
     pub response_status: String,
