@@ -12,6 +12,7 @@ use std::pin::Pin;
 
 use crate::config::{Config, StripeConfig, TravelportCredentials};
 use crate::db::DbPool;
+use crate::tools::gmail::{GetEmailTool, ListEmailsTool, ReplyToEmailTool, SendEmailTool};
 use crate::tools::google_calendar::{
     CreateCalendarEventTool, DeleteCalendarEventTool, FindFreeTimeTool, GoogleCalendarTool,
     RespondToEventTool, UpdateCalendarEventTool,
@@ -24,6 +25,7 @@ use super::context::{ChatTurn, LocaleContext, StripePaymentRefs, ToolAuth};
 const DEFAULT_MODEL: &str = "gemini-3.1-flash-lite";
 
 const CALENDAR_PREAMBLE_TEMPLATE: &str = include_str!("../../prompts/google_calendar/preamble.md");
+const GMAIL_PREAMBLE: &str = include_str!("../../prompts/gmail/preamble.md");
 const HOTEL_PREAMBLE: &str = include_str!("../../prompts/travelport/preamble.md");
 
 /// LLM client with all persistent dependencies attached. One instance per
@@ -95,12 +97,19 @@ impl LlmClient {
             return;
         };
         push_preamble(preamble, &build_calendar_preamble(locale));
+        push_preamble(preamble, GMAIL_PREAMBLE);
+        // Calendar tools.
         tools.push(Box::new(GoogleCalendarTool::new(token.clone())));
         tools.push(Box::new(CreateCalendarEventTool::new(token.clone())));
         tools.push(Box::new(UpdateCalendarEventTool::new(token.clone())));
         tools.push(Box::new(DeleteCalendarEventTool::new(token.clone())));
         tools.push(Box::new(RespondToEventTool::new(token.clone())));
-        tools.push(Box::new(FindFreeTimeTool::new(token)));
+        tools.push(Box::new(FindFreeTimeTool::new(token.clone())));
+        // Gmail tools.
+        tools.push(Box::new(ListEmailsTool::new(token.clone())));
+        tools.push(Box::new(GetEmailTool::new(token.clone())));
+        tools.push(Box::new(SendEmailTool::new(token.clone())));
+        tools.push(Box::new(ReplyToEmailTool::new(token)));
     }
 
     fn add_travel_tools(

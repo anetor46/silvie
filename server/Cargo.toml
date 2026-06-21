@@ -35,3 +35,5 @@ uuid = { version = "1", features = ["serde"] }
 
 # ── Auth0 JWT validation ─────────────────────────────────────────────────────
 jsonwebtoken = { version = "10", features = ["rust_crypto"]}
+# ── Base64 (Gmail API raw message encode/decode) ─────────────────────────────
+base64 = "0.22"
