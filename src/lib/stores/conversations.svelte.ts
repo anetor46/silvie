@@ -22,6 +22,7 @@ interface StoredToolPayload {
   status?: string;
   summary?: string | null;
   success?: boolean | null;
+  output?: unknown;
 }
 
 /** Map a backend message row to the UI view-model. Returns null for rows we
@@ -52,6 +53,7 @@ function toUiMessage(m: BackendMessage): Message | null {
       requiresConfirmation: parsed.requires_confirmation ?? false,
       status,
       summary: parsed.summary ?? undefined,
+      output: parsed.output ?? undefined,
       decision,
     };
     return { id: m.id, role: 'tool', content: m.content, toolCall };
@@ -172,9 +174,14 @@ class ConversationsStore {
     ];
   }
 
-  /** Update the matching tool row's status / summary when the tool result
-   *  arrives. No-op if no matching row exists. */
-  updateToolResult(callId: string, success: boolean, summary: string | null): void {
+  /** Update the matching tool row's status / summary / output when the tool
+   *  result arrives. No-op if no matching row exists. */
+  updateToolResult(
+    callId: string,
+    success: boolean,
+    summary: string | null,
+    output: unknown,
+  ): void {
     this.currentMessages = this.currentMessages.map((m) => {
       if (m.role !== 'tool' || m.toolCall?.callId !== callId) return m;
       return {
@@ -183,6 +190,7 @@ class ConversationsStore {
           ...m.toolCall!,
           status: success ? 'success' : 'error',
           summary: summary ?? m.toolCall!.summary,
+          output: output ?? m.toolCall!.output,
         },
       };
     });

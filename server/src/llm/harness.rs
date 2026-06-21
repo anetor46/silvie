@@ -109,10 +109,12 @@ where
         // Read tool: run inline and emit the result event.
         match self.inner.call(args).await {
             Ok(out) => {
+                let output_json = serde_json::to_value(&out).ok();
                 let _ = self.tx.send(ToolEvent::Result {
                     call_id,
                     success: true,
                     summary: None,
+                    output: output_json,
                 });
                 Ok(WrappedOutput::Done(out))
             }
@@ -122,6 +124,7 @@ where
                     call_id,
                     success: false,
                     summary: Some(msg),
+                    output: None,
                 });
                 Err(WrapperError::Inner(e))
             }

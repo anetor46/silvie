@@ -35,6 +35,7 @@ type ServerEvent =
       call_id: string;
       success: boolean;
       summary: string | null;
+      output: unknown | null;
     }
   | { type: 'done' }
   | { type: 'error'; message: string };
@@ -113,6 +114,7 @@ export function postToolResponse(
               callId: event.call_id,
               success: event.success,
               summary: event.summary,
+              output: event.output,
             });
             break;
           case 'done':

@@ -31,6 +31,10 @@ pub enum SseEvent {
         call_id: String,
         success: bool,
         summary: Option<String>,
+        /// Raw tool output JSON when available — populated so the frontend
+        /// can show the result in the expandable details of the tool card
+        /// without an extra round-trip.
+        output: Option<serde_json::Value>,
     },
     Done,
     #[allow(dead_code)]
@@ -55,6 +59,7 @@ pub enum ToolEvent {
         call_id: String,
         success: bool,
         summary: Option<String>,
+        output: Option<serde_json::Value>,
     },
 }
 
@@ -72,6 +77,7 @@ pub enum ChatEvent {
         call_id: String,
         success: bool,
         summary: Option<String>,
+        output: Option<serde_json::Value>,
     },
 }
 
@@ -93,10 +99,12 @@ impl From<ToolEvent> for ChatEvent {
                 call_id,
                 success,
                 summary,
+                output,
             } => ChatEvent::ToolResult {
                 call_id,
                 success,
                 summary,
+                output,
             },
         }
     }

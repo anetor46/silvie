@@ -59,7 +59,12 @@
         scrollToBottom();
       },
       onToolResult: (result) => {
-        conversations.updateToolResult(result.callId, result.success, result.summary);
+        conversations.updateToolResult(
+          result.callId,
+          result.success,
+          result.summary,
+          result.output,
+        );
         scrollToBottom();
       },
     };

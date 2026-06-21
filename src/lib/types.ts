@@ -26,6 +26,10 @@ export interface ToolCallEntry {
   requiresConfirmation: boolean;
   status: ToolCallStatus;
   summary?: string;
+  /** Raw tool output JSON when the call has succeeded. Shown in the
+   *  expandable card details so the user can inspect what was created /
+   *  fetched. `undefined` when the call hasn't completed or errored. */
+  output?: unknown;
   /** Set once the user clicks Approve / Reject on the confirmation widget.
    *  `null` means the widget is still awaiting input. */
   decision?: 'approved' | 'rejected';

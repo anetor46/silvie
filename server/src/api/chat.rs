@@ -207,6 +207,7 @@ pub fn run_turn(
                             call_id,
                             success,
                             summary,
+                            output,
                         }) => {
                             if let Err(e) = update_tool_status_in_db(
                                 &pool,
@@ -214,7 +215,7 @@ pub fn run_turn(
                                 &call_id,
                                 success,
                                 summary.clone(),
-                                None,
+                                output.clone(),
                             )
                             .await
                             {
@@ -225,6 +226,7 @@ pub fn run_turn(
                                     call_id,
                                     success,
                                     summary,
+                                    output,
                                 },
                                 &mut client_disconnected,
                             );

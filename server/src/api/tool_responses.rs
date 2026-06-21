@@ -141,11 +141,13 @@ pub async fn tool_response_handler(
 
     // 4. Build the SSE stream. Prepend a `ToolResult` event so the UI
     //    card updates immediately, then concat the agent continuation.
+    let output_for_event = output_json.clone();
     let initial = futures::stream::once(async move {
         SseEvent::ToolResult {
             call_id: req.call_id.clone(),
             success,
             summary,
+            output: output_for_event,
         }
     });
 

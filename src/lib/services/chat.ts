@@ -35,6 +35,7 @@ type ServerEvent =
       call_id: string;
       success: boolean;
       summary: string | null;
+      output: unknown | null;
     }
   | { type: 'done' }
   | { type: 'error'; message: string };
@@ -59,6 +60,7 @@ export interface ChatCallbacks {
     callId: string;
     success: boolean;
     summary: string | null;
+    output: unknown | null;
   }) => void;
 }
 
@@ -134,6 +136,7 @@ export function streamChat(
               callId: event.call_id,
               success: event.success,
               summary: event.summary,
+              output: event.output,
             });
             break;
           case 'done':
