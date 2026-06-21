@@ -68,8 +68,11 @@ pub async fn chat_handler(
         .await
         .into_required()?;
 
-    // 2. Persist the user message before doing anything else.
-    conversations::insert_user_message(pool, convo.id, &req.content)
+    // 2. Persist the user message before doing anything else. Keep the
+    //    inserted row's id so we can exclude it from the history we pass
+    //    to the agent — filtering by content would drop EVERY prior user
+    //    message with the same text when the user repeats themselves.
+    let new_user_row = conversations::insert_user_message(pool, convo.id, &req.content)
         .await
         .map_err(ApiError::from)?;
 
@@ -85,15 +88,15 @@ pub async fn chat_handler(
     };
     let tool_auth = build_tool_auth(pool, integ_cfg, auth.user.id).await;
 
-    // 5. History excludes the user message we just inserted — pass it as the
-    //    explicit prompt for this turn.
+    // 5. History excludes the just-inserted user row (we pass it as the
+    //    explicit prompt instead). Filter by ID so repeat questions don't
+    //    accidentally erase older identical user messages from history.
     let rows = conversations::load_history(pool, convo.id)
         .await
         .map_err(ApiError::from)?;
     let history_rows: Vec<_> = rows
-        .iter()
-        .filter(|r| !(r.role == "user" && r.content == req.content))
-        .cloned()
+        .into_iter()
+        .filter(|r| r.id != new_user_row.id)
         .collect();
     let history = db_rows_to_rig_history(&history_rows);
 
