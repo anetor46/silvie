@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ToolCallEntry } from '$lib/types';
   import { getToolInfo } from '$lib/data/tools';
+  import ToolWidget from './ToolWidget.svelte';
 
   let { toolCall }: { toolCall: ToolCallEntry } = $props();
 
@@ -11,9 +12,30 @@
       : info.label,
   );
 
+  /** What goes into the expanded details body. For read tools we show a
+   *  per-tool brief; for write tools we reuse the same args-preview widget
+   *  that the confirmation card uses. */
+  const hasWidget = $derived(Boolean(info.widget));
+  const brief = $derived(
+    !hasWidget && info.brief ? info.brief(toolCall.args ?? {}) : null,
+  );
+  const hasDetails = $derived(hasWidget || Boolean(brief));
+
+  // Expansion state. Auto-open while running (gives the user a sense of
+  // progress — they can see what the agent is looking for), auto-close
+  // once the call finishes. Once the status stops changing, manual
+  // clicks take over.
   let expanded = $state(false);
+  let lastStatus = $state<string | null>(null);
+  $effect(() => {
+    if (toolCall.status !== lastStatus) {
+      lastStatus = toolCall.status;
+      expanded = toolCall.status === 'running' && hasDetails;
+    }
+  });
 
   function toggle() {
+    if (!hasDetails) return;
     expanded = !expanded;
   }
 
@@ -23,24 +45,6 @@
       toggle();
     }
   }
-
-  /** Pretty-print a JSON value as a multi-line string. Returns the raw
-   *  string if it's not actually JSON-serialisable. */
-  function pretty(value: unknown): string {
-    if (typeof value === 'string') return value;
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
-    }
-  }
-
-  const hasArgs = $derived(Object.keys(toolCall.args ?? {}).length > 0);
-  const hasOutput = $derived(toolCall.output !== undefined && toolCall.output !== null);
-  const hasSummary = $derived(
-    toolCall.summary !== undefined && toolCall.summary !== '' && !hasOutput,
-  );
-  const hasDetails = $derived(hasArgs || hasOutput || hasSummary);
 </script>
 
 <div class="tool-card" data-status={toolCall.status} data-expanded={expanded}>
@@ -108,22 +112,10 @@
 
   {#if expanded && hasDetails}
     <div class="details">
-      {#if hasArgs}
-        <section>
-          <h4>Input</h4>
-          <pre>{pretty(toolCall.args)}</pre>
-        </section>
-      {/if}
-      {#if hasOutput}
-        <section>
-          <h4>Result</h4>
-          <pre>{pretty(toolCall.output)}</pre>
-        </section>
-      {:else if hasSummary}
-        <section>
-          <h4>Result</h4>
-          <p class="result-text">{toolCall.summary}</p>
-        </section>
+      {#if hasWidget}
+        <ToolWidget {toolCall} />
+      {:else if brief}
+        <p class="brief">{brief}</p>
       {/if}
     </div>
   {/if}
@@ -255,51 +247,17 @@
 
   .details {
     border-top: 1px solid var(--border);
-    padding: 10px 12px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+    padding: 12px 14px;
     background: var(--bg);
   }
   .tool-card[data-status='pending_user'] .details {
     background: var(--surface);
   }
 
-  section {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  h4 {
+  .brief {
     margin: 0;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-
-  pre {
-    margin: 0;
-    font-family: 'Menlo', 'Consolas', monospace;
-    font-size: 11.5px;
+    font-size: 13px;
     line-height: 1.5;
-    color: var(--text-primary);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px 10px;
-    overflow-x: auto;
-    max-height: 280px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  .result-text {
-    margin: 0;
-    font-size: 12px;
     color: var(--text-primary);
   }
 

@@ -1,26 +1,18 @@
 <script lang="ts">
   import type { ToolCallEntry } from '$lib/types';
-  import { getToolInfo } from '$lib/data/tools';
   import type { ToolResponse } from '$lib/services/confirmations';
-  import EmailSendWidget from './widgets/EmailSendWidget.svelte';
-  import EmailReplyWidget from './widgets/EmailReplyWidget.svelte';
-  import CalendarEventCreateWidget from './widgets/CalendarEventCreateWidget.svelte';
-  import CalendarEventUpdateWidget from './widgets/CalendarEventUpdateWidget.svelte';
-  import CalendarEventDeleteWidget from './widgets/CalendarEventDeleteWidget.svelte';
-  import CalendarEventRespondWidget from './widgets/CalendarEventRespondWidget.svelte';
-  import HotelBookWidget from './widgets/HotelBookWidget.svelte';
+  import { getToolInfo } from '$lib/data/tools';
+  import ToolWidget from './ToolWidget.svelte';
 
   let {
     toolCall,
     onRespond,
   }: {
     toolCall: ToolCallEntry;
-    /** Owner (the chat page) handles the resume SSE stream so it can pipe
-     *  follow-up tokens / tool calls into the conversation store. */
     onRespond: (callId: string, response: ToolResponse) => Promise<void>;
   } = $props();
 
-  const widgetKind = $derived(getToolInfo(toolCall.name).widget);
+  const hasWidget = $derived(Boolean(getToolInfo(toolCall.name).widget));
   let busy = $state(false);
   let error = $state<string | null>(null);
 
@@ -39,20 +31,8 @@
 </script>
 
 <div class="card">
-  {#if widgetKind === 'email_send'}
-    <EmailSendWidget args={toolCall.args} />
-  {:else if widgetKind === 'email_reply'}
-    <EmailReplyWidget args={toolCall.args} />
-  {:else if widgetKind === 'calendar_event_create'}
-    <CalendarEventCreateWidget args={toolCall.args} />
-  {:else if widgetKind === 'calendar_event_update'}
-    <CalendarEventUpdateWidget args={toolCall.args} />
-  {:else if widgetKind === 'calendar_event_delete'}
-    <CalendarEventDeleteWidget args={toolCall.args} />
-  {:else if widgetKind === 'calendar_event_respond'}
-    <CalendarEventRespondWidget args={toolCall.args} />
-  {:else if widgetKind === 'hotel_book'}
-    <HotelBookWidget args={toolCall.args} />
+  {#if hasWidget}
+    <ToolWidget {toolCall} />
   {:else}
     <p class="generic">
       The assistant wants to run <code>{toolCall.name}</code>.
