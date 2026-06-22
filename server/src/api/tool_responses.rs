@@ -77,7 +77,14 @@ pub async fn tool_response_handler(
 
     // 2. Build tool auth + locale upfront (used by both the execute step and
     //    the resumed agent stream).
-    let tool_auth = build_tool_auth(pool, integ_cfg, auth.user.id).await;
+    let tool_auth = build_tool_auth(
+        pool,
+        integ_cfg,
+        config,
+        auth.user.id,
+        Some(pending.conversation_id),
+    )
+    .await;
     let locale = LocaleContext {
         timezone: req.timezone,
         current_datetime: req.current_datetime,
@@ -197,6 +204,7 @@ fn friendly_action(tool_name: &str) -> &'static str {
         "respond_outlook_event" => "responding to the Outlook calendar invitation",
         // Travelport
         "hotel_book" => "booking the hotel",
+        "hotel_cancel_booking" => "cancelling the hotel booking",
         _ => "the requested action",
     }
 }

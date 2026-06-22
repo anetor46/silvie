@@ -11,7 +11,7 @@ use rig::{
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::config::{Config, StripeConfig, TravelportCredentials};
+use crate::config::{Config, StripeConfig};
 use crate::db::DbPool;
 use crate::tools::gmail::{GetEmailTool, ListEmailsTool, ReplyToEmailTool, SendEmailTool};
 use crate::tools::google_calendar::{
@@ -23,7 +23,10 @@ use crate::tools::outlook::{
     ListOutlookEmailsTool, ListOutlookEventsTool, ReplyOutlookEmailTool, RespondOutlookEventTool,
     SendOutlookEmailTool, UpdateOutlookEventTool,
 };
-use crate::tools::travelport::{HotelBookTool, HotelSearchTool};
+use crate::tools::travelport::{
+    HotelAvailabilityTool, HotelBookTool, HotelBookToolDeps, HotelCancelBookingTool,
+    HotelDetailsTool, HotelRetrieveBookingTool, HotelSearchTool,
+};
 use crate::types::{ChatEvent, ToolEvent};
 
 use super::context::{ChatTurn, LocaleContext, StripePaymentRefs, ToolAuth};
@@ -44,7 +47,6 @@ pub struct LlmClient {
     model: String,
     db_pool: DbPool,
     stripe: Option<StripeConfig>,
-    travelport: Option<TravelportCredentials>,
 }
 
 impl LlmClient {
@@ -56,7 +58,6 @@ impl LlmClient {
             model: DEFAULT_MODEL.to_string(),
             db_pool,
             stripe: config.stripe.clone(),
-            travelport: config.travelport.clone(),
         })
     }
 
@@ -236,28 +237,55 @@ impl LlmClient {
         auth: &ToolAuth,
         tool_tx: &tokio::sync::mpsc::UnboundedSender<ToolEvent>,
     ) {
-        let Some(tp) = self.travelport.as_ref() else {
+        let Some(tp) = auth.travelport.as_ref() else {
             return;
         };
         push_preamble(preamble, HOTEL_PREAMBLE);
+
+        // Read tools — usable for anyone with Travelport configured.
         tools.push(Box::new(ToolWrapper::new_read(
-            HotelSearchTool::new(tp.client_id.clone(), tp.client_secret.clone()),
+            HotelSearchTool::new(tp.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_read(
+            HotelDetailsTool::new(tp.clone()),
+            tool_tx.clone(),
+        )));
+        tools.push(Box::new(ToolWrapper::new_read(
+            HotelAvailabilityTool::new(tp.clone()),
             tool_tx.clone(),
         )));
 
+        // Booking, retrieve, cancel — need an authenticated user (DB-bound)
+        // and a stored Stripe PM.
+        let Some(user_id) = auth.user_id else { return };
+        tools.push(Box::new(ToolWrapper::new_read(
+            HotelRetrieveBookingTool::new(tp.clone(), self.db_pool.clone(), user_id),
+            tool_tx.clone(),
+        )));
         if let (Some(stripe), Some(pm)) = (self.stripe.as_ref(), auth.stripe_payment.as_ref()) {
             let StripePaymentRefs {
                 customer_id,
                 payment_method_id,
             } = pm.clone();
             tools.push(Box::new(ToolWrapper::new_write(
-                HotelBookTool::new(
-                    tp.client_id.clone(),
-                    tp.client_secret.clone(),
-                    stripe.secret_key.clone(),
+                HotelBookTool::new(HotelBookToolDeps {
+                    travelport: tp.clone(),
+                    stripe_key: stripe.secret_key.clone(),
                     customer_id,
                     payment_method_id,
+                    user_id,
+                    conversation_id: auth.conversation_id,
+                    db_pool: self.db_pool.clone(),
+                }),
+                tool_tx.clone(),
+            )));
+            tools.push(Box::new(ToolWrapper::new_write(
+                HotelCancelBookingTool::new(
+                    tp.clone(),
+                    stripe.secret_key.clone(),
                     self.db_pool.clone(),
+                    user_id,
                 ),
                 tool_tx.clone(),
             )));

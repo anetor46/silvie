@@ -3,6 +3,7 @@
 //! [`crate::api`] and call into these.
 
 pub mod conversations;
+pub mod hotel_bookings;
 pub mod integrations;
 pub mod payments;
 pub mod user_info;

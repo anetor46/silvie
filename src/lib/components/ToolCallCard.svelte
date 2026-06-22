@@ -12,14 +12,20 @@
       : info.label,
   );
 
-  /** What goes into the expanded details body. For read tools we show a
-   *  per-tool brief; for write tools we reuse the same args-preview widget
-   *  that the confirmation card uses. */
+  /** What goes into the expanded details body.
+   *  - Successful calls with a `resultWidget` render their output.
+   *  - Otherwise: write tools fall back to the args-preview widget; read
+   *    tools fall back to a per-tool brief string. */
   const hasWidget = $derived(Boolean(info.widget));
-  const brief = $derived(
-    !hasWidget && info.brief ? info.brief(toolCall.args ?? {}) : null,
+  const hasResultWidget = $derived(
+    Boolean(info.resultWidget) && toolCall.status === 'success',
   );
-  const hasDetails = $derived(hasWidget || Boolean(brief));
+  const brief = $derived(
+    !hasWidget && !hasResultWidget && info.brief
+      ? info.brief(toolCall.args ?? {})
+      : null,
+  );
+  const hasDetails = $derived(hasResultWidget || hasWidget || Boolean(brief));
 
   // Expansion state. Auto-open while running (gives the user a sense of
   // progress — they can see what the agent is looking for), auto-close
@@ -30,7 +36,15 @@
   $effect(() => {
     if (toolCall.status !== lastStatus) {
       lastStatus = toolCall.status;
-      expanded = toolCall.status === 'running' && hasDetails;
+      if (toolCall.status === 'running' && hasDetails) {
+        expanded = true;
+      } else if (toolCall.status === 'success' && hasResultWidget) {
+        // Keep the rich result visible — most useful for hotel_search where
+        // the user immediately wants to see the cards.
+        expanded = true;
+      } else {
+        expanded = false;
+      }
     }
   });
 
@@ -112,7 +126,9 @@
 
   {#if expanded && hasDetails}
     <div class="details">
-      {#if hasWidget}
+      {#if hasResultWidget}
+        <ToolWidget {toolCall} mode="result" />
+      {:else if hasWidget}
         <ToolWidget {toolCall} />
       {:else if brief}
         <p class="brief">{brief}</p>

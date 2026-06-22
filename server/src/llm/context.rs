@@ -29,9 +29,18 @@ pub struct LocaleContext {
 /// Per-user credentials the LLM tools need at call time.
 #[derive(Debug, Default, Clone)]
 pub struct ToolAuth {
+    /// Authenticated user — populated by chat handlers. Required by tools
+    /// that read or mutate user-owned DB rows (e.g. hotel bookings).
+    pub user_id: Option<uuid::Uuid>,
+    /// Current conversation id. Persisted alongside any rows created by
+    /// tools so the user's "where did this come from" trail stays intact.
+    pub conversation_id: Option<uuid::Uuid>,
     pub google_access_token: Option<String>,
     pub outlook_access_token: Option<String>,
     pub stripe_payment: Option<StripePaymentRefs>,
+    /// Travelport HTTP client (with cached bearer token) — present only when
+    /// Travelport credentials are configured for this server.
+    pub travelport: Option<crate::tools::travelport::TravelportClient>,
 }
 
 #[derive(Debug, Clone)]

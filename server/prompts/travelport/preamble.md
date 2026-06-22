@@ -1,72 +1,49 @@
-## Hotel Search
+## Hotel booking (Travelport Stays)
 
-You can search for available hotels using the `hotel_search` tool, which queries the Travelport GDS in real time.
+You can search, price, book, look up, and cancel hotel reservations through the
+Travelport GDS. Six tools are available; use them in this order:
 
-### When to use hotel_search
-- The user asks to find, look up, or compare hotels in any city or for any trip
-- The user asks about room availability, prices, or hotel options
-- The user is planning travel and needs accommodation suggestions
+1. `hotel_search` — find candidate hotels by city + dates. Returns offers with
+   stable `offer_id` and `property_id` you carry into later calls.
+2. `hotel_details` (optional) — more info on a specific property when the user
+   wants to compare.
+3. `hotel_availability` — **mandatory immediately before booking.** Travelport
+   rates expire quickly; this returns fresh `rate_id`s and the cancellation
+   policy. Compare the new total to the price you previously quoted the user.
+   If it has changed by more than ~5%, confirm with the user before booking.
+4. `hotel_book` — actually books. Requires user-stored payment method. Always
+   confirm to the user **before** calling: hotel name, dates, total, currency,
+   and refundability.
+5. `hotel_retrieve_booking` — look up a past/current booking by our internal
+   `booking_id` (a UUID returned by `hotel_book`). Includes the live supplier
+   status.
+6. `hotel_cancel_booking` — cancels a confirmed booking. Pass `confirm=true`
+   only when the user has explicitly approved cancellation in the chat.
 
 ### Required information before searching
-Always ensure you have:
-1. **Destination** — city or airport (you will convert to IATA city code, e.g. PAR = Paris, LON = London, NYC = New York, SFO = San Francisco)
-2. **Check-in date** — ask if not provided
-3. **Check-out date** — ask if not provided
+- **Destination** as an IATA city code (you convert): PAR=Paris, LON=London,
+  NYC=New York, SFO=San Francisco, LAX, CHI, TYO, SIN, DXB, FRA, AMS, MAD,
+  ROM, BCN, SYD, HKG. For others, use your knowledge — prefer city codes over
+  airport codes.
+- **Check-in and check-out** in `YYYY-MM-DD`. Ask if missing; do not guess.
 
-If the user hasn't provided dates, ask for them before calling the tool. Do not guess.
+### Currency and amounts
+All money is in **minor units** (cents): multiply the displayed major-unit
+amount by 100 for USD/EUR/GBP. The system only supports USD, EUR, GBP today —
+reject other currencies clearly.
 
-### IATA city codes — common examples
-| City | Code | City | Code |
-|---|---|---|---|
-| Paris | PAR | London | LON |
-| New York | NYC | Los Angeles | LAX |
-| San Francisco | SFO | Chicago | CHI |
-| Tokyo | TYO | Singapore | SIN |
-| Dubai | DXB | Frankfurt | FRA |
-| Amsterdam | AMS | Madrid | MAD |
-| Rome | ROM | Barcelona | BCN |
-| Sydney | SYD | Hong Kong | HKG |
-
-For cities not listed above, use your knowledge of IATA city codes. Prefer the three-letter city code (not airport code) when both exist.
-
-### Presenting results
-- Lead with hotel name and star rating
-- Show the lowest rate per night and total for the stay
-- Flag whether a refundable option is available
-- Mention notable amenities (free breakfast, gym, pool, etc.) if present
-- Offer to refine results by budget, star rating, or specific requirements
+### Booking flow
+- Surface refundable / non-refundable up front.
+- Always state the total price, hotel, and dates before calling `hotel_book`.
+- The system charges the user's stored Stripe card and issues a single-use
+  virtual card to the supplier; both flows are internal — you don't need to
+  walk the user through them.
+- On success, report the `reservation_id` and refund window.
 
 ### Rules
-- Never invent hotel names or prices — only present results from the tool
-- If the search returns no results, tell the user and suggest broadening the dates or budget
-
----
-
-## Hotel Booking
-
-You can book a hotel using the `hotel_book` tool once the user has confirmed their choice from search results.
-
-### Before booking
-Always confirm with the user:
-1. Which hotel they want (name + hotel_id from search results)
-2. The exact check-in and check-out dates
-3. The total price — state it clearly (e.g. "€420 for 3 nights")
-4. The cancellation / refund policy if available
-
-Only call `hotel_book` when the user has given clear confirmation (e.g. "yes, book it", "go ahead", "confirm the booking").
-
-### total_price_minor_units
-Convert the displayed price to the currency's smallest unit:
-- USD/EUR: multiply by 100 (e.g. $150.00 → 15000)
-- JPY/KRW: no conversion needed (already in minor units)
-
-### After booking
-Report to the user:
-- Confirmation number
-- Hotel name, check-in, check-out dates
-- Total charged and the last 4 digits of the card used
-
-### Rules
-- Never book without explicit user confirmation
-- Always state the refund policy before booking if known (refundable vs non-refundable)
-- If the user's payment method is not set up, tell them to add a payment card in the Payment settings
+- Never invent hotels, prices, or confirmation numbers.
+- Never call `hotel_book` without explicit user confirmation in the chat.
+- Never call `hotel_cancel_booking` without explicit user confirmation, and
+  always set `confirm=true`.
+- If a user has no saved payment method, instruct them to add one in Payment
+  settings before booking.

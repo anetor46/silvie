@@ -1,13 +1,22 @@
-Books a hotel room via the Travelport GDS using the user's stored payment method. A single-use virtual card is issued by Stripe for the exact booking amount, charged to the user's card on file, and passed to the GDS as the Form of Payment.
+Book a hotel reservation via the Travelport GDS. This is a paid action: the
+user's stored Stripe payment method is authorised for the booking amount, a
+single-use virtual card is issued, and Travelport books with the virtual card.
+On success the customer is charged; on failure the authorisation is released.
 
-Use this tool only after the user has explicitly confirmed they want to complete the booking, and only when you have a specific hotel from a hotel_search result (with a valid hotel_id).
+Before calling this tool you MUST have:
+- `property_id`, `offer_id`, `rate_id` from the most recent `hotel_availability`
+  call (rates older than that may be stale).
+- `hotel_name`, `check_in`, `check_out`, `guests`, `guest_name`.
+- `total_price_minor_units` — the exact total returned by
+  `hotel_availability.total_minor_units`. Do NOT re-derive from per-night
+  numbers.
+- `currency` — uppercase ISO 4217 (`USD`, `EUR`, `GBP`).
 
-Before calling this tool you must have:
-- hotel_id (from hotel_search)
-- check_in and check_out dates
-- total_price_minor_units (the total stay cost in the currency's smallest unit — multiply the displayed price by 100)
-- currency code (lowercase ISO 4217, e.g. "usd", "eur")
+Always state the price, hotel, dates, and refund policy to the user and obtain
+explicit confirmation in chat ("yes, book it", "go ahead") before invoking
+this tool. The confirmation UI shown to the user is your safety net, not a
+replacement for stating the details.
 
-Always state the total price, hotel name, and dates to the user before booking. Ask for confirmation unless the user's message unambiguously requested to book (e.g. "yes, book it" or "go ahead and book").
-
-On success, report the confirmation number and card last4 to the user so they have a record.
+On success, report the `reservation_id` and our `booking_id` so the user has
+a record. The `booking_id` is what `hotel_retrieve_booking` and
+`hotel_cancel_booking` take.

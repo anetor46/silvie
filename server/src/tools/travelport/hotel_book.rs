@@ -2,90 +2,88 @@ use chrono::NaiveDate;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{error, info, instrument, warn};
+use uuid::Uuid;
 
 use crate::db::DbPool;
+use crate::repos::hotel_bookings::{self, mark_confirmed, mark_failed, ENTITY_TYPE};
 use crate::repos::payments::{log_issuing_card_creation, mark_issuing_card_cancelled};
 use crate::services::stripe::PaymentClient;
-use super::auth::fetch_access_token;
-use super::error::{make_api_error, TravelportError};
 
-// TODO: verify exact booking endpoint from Travelport+ API docs
-const HOTEL_BOOK_URL: &str = "https://api.travelport.com/11/hotel/offers/book";
+use super::client::TravelportClient;
+use super::error::TravelportError;
+use super::models::{BookFormOfPayment, BookReq};
 
 const DESCRIPTION: &str = include_str!("../../../prompts/travelport/hotel_book.md");
 
 pub struct HotelBookTool {
-    tp_client_id: String,
-    tp_client_secret: String,
+    travelport: TravelportClient,
     stripe_key: String,
     customer_id: String,
     payment_method_id: String,
-    http_client: reqwest::Client,
+    user_id: Uuid,
+    conversation_id: Option<Uuid>,
     db_pool: DbPool,
 }
 
+pub struct HotelBookToolDeps {
+    pub travelport: TravelportClient,
+    pub stripe_key: String,
+    pub customer_id: String,
+    pub payment_method_id: String,
+    pub user_id: Uuid,
+    pub conversation_id: Option<Uuid>,
+    pub db_pool: DbPool,
+}
+
 impl HotelBookTool {
-    pub fn new(
-        tp_client_id: String,
-        tp_client_secret: String,
-        stripe_key: String,
-        customer_id: String,
-        payment_method_id: String,
-        db_pool: DbPool,
-    ) -> Self {
+    pub fn new(deps: HotelBookToolDeps) -> Self {
         Self {
-            tp_client_id,
-            tp_client_secret,
-            stripe_key,
-            customer_id,
-            payment_method_id,
-            http_client: reqwest::Client::new(),
-            db_pool,
+            travelport: deps.travelport,
+            stripe_key: deps.stripe_key,
+            customer_id: deps.customer_id,
+            payment_method_id: deps.payment_method_id,
+            user_id: deps.user_id,
+            conversation_id: deps.conversation_id,
+            db_pool: deps.db_pool,
         }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HotelBookArgs {
-    /// Hotel property ID from hotel_search results.
-    pub hotel_id: String,
-    /// Human-readable hotel name (for the confirmation message).
+    /// Property ID from `hotel_search`.
+    pub property_id: String,
+    /// Offer ID from `hotel_availability` (rate is freshest there).
+    pub offer_id: String,
+    /// Rate ID from `hotel_availability`.
+    pub rate_id: String,
     pub hotel_name: String,
-    /// Check-in date in YYYY-MM-DD format.
     pub check_in: String,
-    /// Check-out date in YYYY-MM-DD format.
     pub check_out: String,
-    /// Number of guests (default 1).
-    pub guests: Option<u32>,
-    /// Total stay cost in the currency's smallest unit (e.g. cents for USD/EUR).
+    /// Number of guests on the reservation.
+    pub guests: u32,
+    /// Lead guest full name (required by the GDS).
+    pub guest_name: String,
+    pub guest_email: Option<String>,
+    /// Stay total in the currency's smallest unit (e.g. cents). Multiply
+    /// displayed price by 100 for USD/EUR/GBP.
     pub total_price_minor_units: u64,
-    /// ISO 4217 currency code, lowercase (e.g. "usd", "eur").
+    /// ISO 4217 currency code, uppercase ("USD", "EUR", "GBP").
     pub currency: String,
-    /// Rate plan / room type ID from hotel_search, if available.
-    pub rate_id: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct HotelBookOutput {
-    pub confirmation_number: String,
+    pub booking_id: Uuid,
+    pub reservation_id: String,
     pub hotel_name: String,
     pub check_in: String,
     pub check_out: String,
     pub total_charged_minor_units: u64,
     pub currency: String,
-    /// Last 4 digits of the Issuing card used (for the user's receipt reference).
-    pub card_last4: String,
     pub status: String,
-}
-
-#[derive(Deserialize)]
-struct TravelportBookingResponse {
-    // TODO: adjust field names to match actual Travelport+ booking response schema
-    #[serde(alias = "confirmationNumber", alias = "ConfirmationNumber")]
-    confirmation_number: Option<String>,
-    #[serde(alias = "bookingReference", alias = "BookingReference")]
-    booking_reference: Option<String>,
+    pub refundable: bool,
 }
 
 impl Tool for HotelBookTool {
@@ -101,147 +99,156 @@ impl Tool for HotelBookTool {
             description: DESCRIPTION.trim().to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["hotel_id", "hotel_name", "check_in", "check_out", "total_price_minor_units", "currency"],
+                "required": [
+                    "property_id", "offer_id", "rate_id", "hotel_name",
+                    "check_in", "check_out", "guests", "guest_name",
+                    "total_price_minor_units", "currency"
+                ],
                 "properties": {
-                    "hotel_id": {
-                        "type": "string",
-                        "description": "Property ID from hotel_search results."
-                    },
-                    "hotel_name": {
-                        "type": "string",
-                        "description": "Hotel name for the confirmation message."
-                    },
-                    "check_in": {
-                        "type": "string",
-                        "description": "Check-in date in YYYY-MM-DD format."
-                    },
-                    "check_out": {
-                        "type": "string",
-                        "description": "Check-out date in YYYY-MM-DD format."
-                    },
-                    "guests": {
-                        "type": "integer",
-                        "description": "Number of guests. Defaults to 1.",
-                        "minimum": 1
-                    },
-                    "total_price_minor_units": {
-                        "type": "integer",
-                        "description": "Total stay cost in the currency's smallest unit (cents for USD/EUR). \
-                            Multiply the displayed price by 100 (e.g. $150.00 → 15000)."
-                    },
-                    "currency": {
-                        "type": "string",
-                        "description": "ISO 4217 currency code, lowercase (e.g. \"usd\", \"eur\")."
-                    },
-                    "rate_id": {
-                        "type": "string",
-                        "description": "Rate plan or room type ID from hotel_search, if available."
-                    }
+                    "property_id":   { "type": "string" },
+                    "offer_id":      { "type": "string" },
+                    "rate_id":       { "type": "string" },
+                    "hotel_name":    { "type": "string" },
+                    "check_in":      { "type": "string", "description": "YYYY-MM-DD" },
+                    "check_out":     { "type": "string", "description": "YYYY-MM-DD" },
+                    "guests":        { "type": "integer", "minimum": 1 },
+                    "guest_name":    { "type": "string", "description": "Lead guest full name." },
+                    "guest_email":   { "type": "string" },
+                    "total_price_minor_units": { "type": "integer", "minimum": 1, "description": "Stay total in minor units (multiply USD/EUR/GBP by 100)." },
+                    "currency":      { "type": "string", "enum": ["USD", "EUR", "GBP"] }
                 }
             }),
         }
     }
 
     #[instrument(skip(self), fields(
-        hotel_id = %args.hotel_id,
-        check_in = %args.check_in,
-        check_out = %args.check_out,
-        currency = %args.currency
+        property_id = %args.property_id,
+        offer_id = %args.offer_id,
+        currency = %args.currency,
+        total = args.total_price_minor_units,
     ))]
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Validate dates
-        NaiveDate::parse_from_str(&args.check_in, "%Y-%m-%d").map_err(|e| {
-            TravelportError::InvalidArg(format!("check_in not a valid date: {e}"))
-        })?;
-        NaiveDate::parse_from_str(&args.check_out, "%Y-%m-%d").map_err(|e| {
-            TravelportError::InvalidArg(format!("check_out not a valid date: {e}"))
+        let check_in = NaiveDate::parse_from_str(&args.check_in, "%Y-%m-%d")
+            .map_err(|e| TravelportError::InvalidArg(format!("check_in not a valid date: {e}")))?;
+        let check_out = NaiveDate::parse_from_str(&args.check_out, "%Y-%m-%d")
+            .map_err(|e| TravelportError::InvalidArg(format!("check_out not a valid date: {e}")))?;
+        if check_out <= check_in {
+            return Err(TravelportError::InvalidArg(
+                "check_out must be after check_in".into(),
+            ));
+        }
+        let currency = args.currency.to_uppercase();
+        if !matches!(currency.as_str(), "USD" | "EUR" | "GBP") {
+            return Err(TravelportError::InvalidArg(format!(
+                "unsupported currency '{currency}'; allowed: USD, EUR, GBP"
+            )));
+        }
+
+        // Step 1: persist a pending booking row so we have our own id.
+        let booking_id = hotel_bookings::insert_pending(
+            &self.db_pool,
+            hotel_bookings::InsertPending {
+                user_id: self.user_id,
+                conversation_id: self.conversation_id,
+                travelport_property_id: &args.property_id,
+                travelport_offer_id: Some(&args.offer_id),
+                hotel_name: &args.hotel_name,
+                check_in,
+                check_out,
+                guests: args.guests as i32,
+                rooms: 1,
+                total_amount_minor_units: args.total_price_minor_units as i64,
+                currency: &currency,
+                payment_method_id: Some(&self.payment_method_id),
+            },
+        )
+        .await
+        .map_err(|e| {
+            error!("failed to insert pending hotel_bookings row: {e:#}");
+            TravelportError::InvalidArg(format!("could not record pending booking: {e}"))
         })?;
 
-        info!(
-            hotel_id = %args.hotel_id,
-            total_price_minor_units = args.total_price_minor_units,
-            currency = %args.currency,
-            "booking hotel via Travelport+ with Stripe Issuing card"
-        );
-
-        // Step 1: Issue a single-use Stripe virtual card for the booking amount.
         let payment_client = PaymentClient::new(self.stripe_key.clone());
-        let issuing_card = payment_client
+
+        // Step 2: authorise the customer's PM for the booking amount.
+        let intent = match payment_client
+            .create_and_confirm_intent(
+                &self.customer_id,
+                &self.payment_method_id,
+                args.total_price_minor_units,
+                &currency,
+                &[("booking_id", &booking_id.to_string())],
+            )
+            .await
+        {
+            Ok(i) => i,
+            Err(e) => {
+                let reason = format!("payment authorisation declined: {e}");
+                error!("{reason}");
+                let _ = mark_failed(&self.db_pool, booking_id, &reason).await;
+                return Err(TravelportError::InvalidArg(reason));
+            }
+        };
+        if let Err(e) =
+            hotel_bookings::attach_payment_intent(&self.db_pool, booking_id, &intent.id).await
+        {
+            warn!("failed to attach payment intent {} to booking {booking_id}: {e:#}", intent.id);
+        }
+
+        // Step 3: issue the single-use virtual card Travelport will charge.
+        let card = match payment_client
             .create_booking_card(
                 &self.customer_id,
                 &self.payment_method_id,
                 args.total_price_minor_units,
-                &args.currency,
+                &currency,
             )
             .await
-            .map_err(|e| {
-                error!("Stripe Issuing card creation failed: {e:#}");
-                TravelportError::InvalidArg(format!("Payment setup failed: {e}"))
-            })?;
-
-        let card_id = issuing_card.id.clone();
-        let card_last4 = issuing_card.pan.chars().rev().take(4).collect::<Vec<_>>()
-            .into_iter().rev().collect::<String>();
-
-        // Audit-log the new Issuing card. Best-effort: the financial reality
-        // is in Stripe; a missed DB write must never block the booking. We
-        // log via warn! and continue.
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let reason = format!("issuing card creation failed: {e}");
+                error!("{reason}");
+                let _ = payment_client.cancel_intent(&intent.id).await;
+                let _ = mark_failed(&self.db_pool, booking_id, &reason).await;
+                return Err(TravelportError::InvalidArg(reason));
+            }
+        };
+        let card_id = card.id.clone();
         if let Err(e) = log_issuing_card_creation(
             &self.db_pool,
             &self.payment_method_id,
             &card_id,
             args.total_price_minor_units as i64,
-            &args.currency,
+            &currency,
+            Some(ENTITY_TYPE),
+            Some(booking_id),
         )
         .await
         {
             warn!("failed to record issuing_card_log entry for {card_id}: {e:#}");
         }
 
-        // Step 2: Fetch a Travelport+ bearer token.
-        let token =
-            fetch_access_token(&self.tp_client_id, &self.tp_client_secret, &self.http_client)
-                .await?;
+        // Step 4: submit the Travelport reservation.
+        let book_req = BookReq {
+            property_id: &args.property_id,
+            offer_id: &args.offer_id,
+            rate_id: &args.rate_id,
+            check_in: &args.check_in,
+            check_out: &args.check_out,
+            guests: args.guests,
+            guest_name: &args.guest_name,
+            guest_email: args.guest_email.as_deref(),
+            form_of_payment: BookFormOfPayment {
+                card_number: &card.pan,
+                exp_month: card.exp_month,
+                exp_year: card.exp_year,
+                cvv: &card.cvv,
+            },
+        };
+        let book_outcome = self.travelport.book(book_req).await;
 
-        // Step 3: Submit the hotel booking with the Issuing card as Form of Payment.
-        // TODO: adjust request body shape to match actual Travelport+ booking API schema.
-        let exp_month = format!("{:02}", issuing_card.exp_month);
-        let exp_year = issuing_card.exp_year.to_string();
-        let request_body = serde_json::json!({
-            "HotelReservation": {
-                "HotelProperty": {
-                    "HotelCode": args.hotel_id,
-                },
-                "HotelStay": {
-                    "CheckinDate": args.check_in,
-                    "CheckoutDate": args.check_out,
-                },
-                "NumberOfAdults": args.guests.unwrap_or(1),
-                "RatePlanCode": args.rate_id,
-                "FormOfPayment": {
-                    "CreditCard": {
-                        "Number": issuing_card.pan,
-                        "ExpDate": format!("{exp_month}/{exp_year}"),
-                        "CVV": issuing_card.cvv,
-                        "Type": "VI",
-                    }
-                }
-            }
-        });
-
-        let book_resp = self
-            .http_client
-            .post(HOTEL_BOOK_URL)
-            .bearer_auth(&token)
-            .json(&request_body)
-            .send()
-            .await?;
-
-        let book_status = book_resp.status();
-        let book_body = book_resp.text().await?;
-        debug!("TravelPort hotel booking status: {book_status}");
-
-        // Step 4: Cancel the Issuing card regardless of booking outcome.
+        // Step 5: cancel the issuing card regardless of outcome.
         if let Err(e) = payment_client.cancel_issuing_card(&card_id).await {
             warn!("failed to cancel Issuing card {card_id}: {e:#}");
         }
@@ -249,33 +256,67 @@ impl Tool for HotelBookTool {
             warn!("failed to mark issuing_card_log row cancelled for {card_id}: {e:#}");
         }
 
-        if !book_status.is_success() {
-            return Err(make_api_error(book_status, book_body));
+        match book_outcome {
+            Ok(resp) => {
+                let reservation_id = resp
+                    .reservation_id
+                    .ok_or_else(|| TravelportError::Parse("missing reservation id".into()))?;
+                let refundable = resp
+                    .cancellation_policy
+                    .as_ref()
+                    .and_then(|p| p.refundable)
+                    .unwrap_or(false);
+                let policy_json = resp.cancellation_policy.as_ref().and_then(|p| {
+                    serde_json::to_value(p.clone().into_domain(&currency)).ok()
+                });
+
+                // Capture the pre-auth.
+                if let Err(e) = payment_client.capture_intent(&intent.id).await {
+                    warn!("Travelport booking succeeded but PaymentIntent capture failed: {e:#}");
+                    let reason = format!(
+                        "booking confirmed at supplier ({reservation_id}) but payment capture failed: {e}"
+                    );
+                    let _ = mark_failed(&self.db_pool, booking_id, &reason).await;
+                    return Err(TravelportError::InvalidArg(reason));
+                }
+
+                if let Err(e) = mark_confirmed(
+                    &self.db_pool,
+                    booking_id,
+                    &reservation_id,
+                    policy_json,
+                )
+                .await
+                {
+                    warn!("booking confirmed at Travelport but DB update failed: {e:#}");
+                }
+
+                info!(
+                    booking_id = %booking_id,
+                    reservation_id = %reservation_id,
+                    "hotel booking confirmed"
+                );
+                Ok(HotelBookOutput {
+                    booking_id,
+                    reservation_id,
+                    hotel_name: args.hotel_name,
+                    check_in: args.check_in,
+                    check_out: args.check_out,
+                    total_charged_minor_units: args.total_price_minor_units,
+                    currency,
+                    status: resp.status.unwrap_or_else(|| "confirmed".into()),
+                    refundable,
+                })
+            }
+            Err(e) => {
+                // Booking failed — release the hold so we don't charge the customer.
+                if let Err(cancel_err) = payment_client.cancel_intent(&intent.id).await {
+                    warn!("failed to release PaymentIntent {} after booking failure: {cancel_err:#}", intent.id);
+                }
+                let reason = format!("Travelport booking failed: {e}");
+                let _ = mark_failed(&self.db_pool, booking_id, &reason).await;
+                Err(e)
+            }
         }
-
-        let booking: TravelportBookingResponse = serde_json::from_str(&book_body)
-            .map_err(|e| TravelportError::Parse(format!("{e}: {book_body}")))?;
-
-        let confirmation_number = booking
-            .confirmation_number
-            .or(booking.booking_reference)
-            .unwrap_or_else(|| "PENDING".to_string());
-
-        info!(
-            confirmation_number = %confirmation_number,
-            hotel = %args.hotel_name,
-            "hotel booking confirmed"
-        );
-
-        Ok(HotelBookOutput {
-            confirmation_number,
-            hotel_name: args.hotel_name,
-            check_in: args.check_in,
-            check_out: args.check_out,
-            total_charged_minor_units: args.total_price_minor_units,
-            currency: args.currency,
-            card_last4,
-            status: "confirmed".to_string(),
-        })
     }
 }

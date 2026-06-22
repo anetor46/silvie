@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthUser,
+    config::Config,
     db::DbPool,
     error::{ApiError, ApiResult, ResultOptionExt},
     llm::{
@@ -33,6 +34,7 @@ use crate::{
         integrations::{self, IntegrationsConfig, GOOGLE_PROVIDER, OUTLOOK_PROVIDER},
         payments,
     },
+    tools::travelport::{TravelportClient, TravelportClientCreds, TravelportEnv},
     types::{ChatEvent, ChatRequest, SseEvent},
 };
 
@@ -58,6 +60,7 @@ pub async fn chat_handler(
     Data(client): Data<&Arc<LlmClient>>,
     Data(pool): Data<&DbPool>,
     Data(integ_cfg): Data<&Arc<IntegrationsConfig>>,
+    Data(config): Data<&Arc<Config>>,
     Json(req): Json<ChatRequest>,
 ) -> ApiResult<SSE> {
     debug!(
@@ -89,7 +92,7 @@ pub async fn chat_handler(
         timezone: req.timezone,
         current_datetime: req.current_datetime,
     };
-    let tool_auth = build_tool_auth(pool, integ_cfg, auth.user.id).await;
+    let tool_auth = build_tool_auth(pool, integ_cfg, config, auth.user.id, Some(convo.id)).await;
 
     // 5. History excludes the just-inserted user row (we pass it as the
     //    explicit prompt instead). Filter by ID so repeat questions don't
@@ -333,12 +336,14 @@ pub fn run_turn(
     }
 }
 
-/// Look up Google + Stripe credentials for the user. Both are optional —
-/// the LLM client gracefully skips tools whose deps are missing.
+/// Look up Google + Stripe credentials for the user. Each integration is
+/// optional — the LLM client gracefully skips tools whose deps are missing.
 pub async fn build_tool_auth(
     pool: &DbPool,
     integ_cfg: &IntegrationsConfig,
+    config: &Config,
     user_id: Uuid,
+    conversation_id: Option<Uuid>,
 ) -> ToolAuth {
     let google_access_token =
         integrations::fresh_access_token(pool, integ_cfg, user_id, GOOGLE_PROVIDER)
@@ -365,10 +370,24 @@ pub async fn build_tool_auth(
             payment_method_id: view.payment_method.stripe_payment_method_id,
         });
 
+    let travelport = config.travelport.as_ref().map(|tp| {
+        TravelportClient::new(TravelportClientCreds {
+            client_id: tp.client_id.clone(),
+            client_secret: tp.client_secret.clone(),
+            username: tp.username.clone(),
+            password: tp.password.clone(),
+            env: TravelportEnv::parse(&tp.env),
+            pcc: tp.pcc.clone(),
+        })
+    });
+
     ToolAuth {
+        user_id: Some(user_id),
+        conversation_id,
         google_access_token,
         outlook_access_token,
         stripe_payment,
+        travelport,
     }
 }
 

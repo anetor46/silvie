@@ -2,56 +2,40 @@ use chrono::NaiveDate;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
-use super::auth::fetch_access_token;
-use super::common::{map_property, ApiSearchResponse, HotelProperty, Rate};
-use super::error::{make_api_error, TravelportError};
-
-// TODO: verify exact search endpoint from Travelport+ developer portal once credentials arrive
-const HOTEL_SEARCH_URL: &str = "https://api.travelport.com/11/hotel/offers/search";
+use super::client::TravelportClient;
+use super::error::TravelportError;
+use super::models::{to_minor_units, HotelOffer, SearchByLocationReq};
 
 const DESCRIPTION: &str = include_str!("../../../prompts/travelport/hotel_search.md");
 
 pub struct HotelSearchTool {
-    client_id: String,
-    client_secret: String,
-    http_client: reqwest::Client,
+    client: TravelportClient,
 }
 
 impl HotelSearchTool {
-    pub fn new(client_id: String, client_secret: String) -> Self {
-        Self {
-            client_id,
-            client_secret,
-            http_client: reqwest::Client::new(),
-        }
+    pub fn new(client: TravelportClient) -> Self {
+        Self { client }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HotelSearchArgs {
-    /// IATA city code, e.g. "PAR" for Paris, "LON" for London.
+    /// IATA city code, e.g. "PAR" for Paris.
     pub destination: String,
-    /// Check-in date in YYYY-MM-DD format.
     pub check_in: String,
-    /// Check-out date in YYYY-MM-DD format.
     pub check_out: String,
-    /// Number of adults per room (default 1).
     pub adults: Option<u32>,
-    /// Number of rooms required (default 1).
     pub rooms: Option<u32>,
-    /// Maximum number of properties to return (default 10).
     pub max_results: Option<u32>,
-    /// Only return hotels priced at or below this nightly rate.
     pub max_rate_per_night: Option<f64>,
-    /// Minimum star rating filter (1.0–5.0).
     pub star_rating_min: Option<f32>,
 }
 
 #[derive(Serialize)]
 pub struct HotelSearchOutput {
-    pub hotels: Vec<HotelProperty>,
+    pub hotels: Vec<HotelOffer>,
     pub destination: String,
     pub check_in: String,
     pub check_out: String,
@@ -73,156 +57,100 @@ impl Tool for HotelSearchTool {
                 "type": "object",
                 "required": ["destination", "check_in", "check_out"],
                 "properties": {
-                    "destination": {
-                        "type": "string",
-                        "description": "IATA city code (3 letters), e.g. \"PAR\" for Paris, \"LON\" for London, \"NYC\" for New York."
-                    },
-                    "check_in": {
-                        "type": "string",
-                        "description": "Check-in date in YYYY-MM-DD format."
-                    },
-                    "check_out": {
-                        "type": "string",
-                        "description": "Check-out date in YYYY-MM-DD format."
-                    },
-                    "adults": {
-                        "type": "integer",
-                        "description": "Number of adults per room. Defaults to 1.",
-                        "minimum": 1
-                    },
-                    "rooms": {
-                        "type": "integer",
-                        "description": "Number of rooms required. Defaults to 1.",
-                        "minimum": 1
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum number of hotels to return. Defaults to 10.",
-                        "minimum": 1,
-                        "maximum": 50
-                    },
-                    "max_rate_per_night": {
-                        "type": "number",
-                        "description": "Maximum nightly rate in the property's currency. Omit to return all prices."
-                    },
-                    "star_rating_min": {
-                        "type": "number",
-                        "description": "Minimum star rating (1–5). Use 4 for 4-star-and-above, 5 for luxury only.",
-                        "minimum": 1,
-                        "maximum": 5
-                    }
+                    "destination": { "type": "string", "description": "IATA city code (3 letters), e.g. PAR, LON, NYC." },
+                    "check_in":    { "type": "string", "description": "Check-in date (YYYY-MM-DD)." },
+                    "check_out":   { "type": "string", "description": "Check-out date (YYYY-MM-DD)." },
+                    "adults":      { "type": "integer", "minimum": 1, "description": "Adults per room. Default 1." },
+                    "rooms":       { "type": "integer", "minimum": 1, "description": "Rooms required. Default 1." },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Max hotels to return. Default 10." },
+                    "max_rate_per_night": { "type": "number", "description": "Optional ceiling for the per-night rate (in the property's currency)." },
+                    "star_rating_min": { "type": "number", "minimum": 1, "maximum": 5, "description": "Minimum star rating filter." }
                 }
             }),
         }
     }
 
-    #[instrument(skip(self), fields(destination = %args.destination, check_in = %args.check_in, check_out = %args.check_out))]
+    #[instrument(skip(self), fields(destination = %args.destination))]
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Validate and compute nights
         let check_in = NaiveDate::parse_from_str(&args.check_in, "%Y-%m-%d")
             .map_err(|e| TravelportError::InvalidArg(format!("check_in not a valid date: {e}")))?;
         let check_out = NaiveDate::parse_from_str(&args.check_out, "%Y-%m-%d")
             .map_err(|e| TravelportError::InvalidArg(format!("check_out not a valid date: {e}")))?;
         if check_out <= check_in {
             return Err(TravelportError::InvalidArg(
-                "check_out must be after check_in".to_string(),
+                "check_out must be after check_in".into(),
             ));
         }
         let nights = (check_out - check_in).num_days() as u32;
 
-        let adults = args.adults.unwrap_or(1);
-        let rooms = args.rooms.unwrap_or(1);
-        let max_results = args.max_results.unwrap_or(10) as usize;
-
-        debug!(
-            client_id_len = self.client_id.len(),
-            nights,
-            adults,
-            rooms,
-            max_results,
-            "searching hotels via Travelport+"
-        );
-
-        let token = fetch_access_token(&self.client_id, &self.client_secret, &self.http_client)
-            .await?;
-
-        // TODO: adjust request body to match exact Travelport+ schema from API docs
-        let request_body = serde_json::json!({
-            "HotelSearchModifiers": {
-                "NumberOfAdults": adults,
-                "NumberOfRooms": rooms,
-            },
-            "HotelStay": {
-                "CheckinDate": args.check_in,
-                "CheckoutDate": args.check_out,
-            },
-            "HotelLocation": {
-                "LocationCode": args.destination.to_uppercase(),
-            },
-        });
-
-        let response = self
-            .http_client
-            .post(HOTEL_SEARCH_URL)
-            .bearer_auth(&token)
-            .json(&request_body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body = response.text().await?;
-        debug!("hotel search response status: {status}");
-
-        if !status.is_success() {
-            return Err(make_api_error(status, body));
-        }
-
-        let api_resp: ApiSearchResponse = serde_json::from_str(&body)
-            .map_err(|e| TravelportError::Parse(format!("{e}: {body}")))?;
-
-        // Collect properties from whichever nesting level the response uses
-        let raw_properties: Vec<_> = if !api_resp.hotel_properties.is_empty() {
-            api_resp.hotel_properties
-        } else {
-            api_resp
-                .response
-                .map(|r| r.hotel_properties)
-                .unwrap_or_default()
+        let req = SearchByLocationReq {
+            location_code: &args.destination.to_uppercase(),
+            check_in: &args.check_in,
+            check_out: &args.check_out,
+            adults: args.adults.unwrap_or(1),
+            rooms: args.rooms.unwrap_or(1),
         };
+        let resp = self.client.search_by_location(req).await?;
 
-        let mut hotels: Vec<HotelProperty> = raw_properties
+        let max_results = args.max_results.unwrap_or(10) as usize;
+        let mut hotels: Vec<HotelOffer> = resp
+            .offers
             .into_iter()
-            .filter_map(|p| map_property(p, nights))
-            .filter(|h| {
-                if let Some(min_stars) = args.star_rating_min {
-                    h.star_rating.map_or(false, |s| s >= min_stars)
-                } else {
-                    true
+            .filter_map(|o| {
+                let offer_id = o.offer_id?;
+                let property_id = o.property_id?;
+                let name = o.name.unwrap_or_default();
+                if name.is_empty() {
+                    return None;
                 }
+                let currency = o.currency.unwrap_or_else(|| "USD".into()).to_uppercase();
+                let total_minor = to_minor_units(o.total, &currency);
+                let per_night_minor = to_minor_units(o.per_night, &currency).or_else(|| {
+                    if nights > 0 {
+                        total_minor.map(|t| t / nights as i64)
+                    } else {
+                        None
+                    }
+                });
+                let (line, city) = o
+                    .address
+                    .map(|a| (a.line.unwrap_or_default(), a.city.unwrap_or_default()))
+                    .unwrap_or_default();
+                Some(HotelOffer {
+                    offer_id,
+                    property_id,
+                    name,
+                    address: line,
+                    city,
+                    stars: o.stars,
+                    image_url: o.image_url,
+                    lowest_total_minor_units: total_minor,
+                    lowest_per_night_minor_units: per_night_minor,
+                    currency,
+                    refundable: o.refundable.unwrap_or(false),
+                })
             })
             .filter(|h| {
-                if let Some(max_rate) = args.max_rate_per_night {
-                    h.lowest_rate
-                        .as_ref()
-                        .map_or(true, |r: &Rate| r.amount <= max_rate)
-                } else {
-                    true
-                }
+                args.star_rating_min
+                    .is_none_or(|m| h.stars.is_some_and(|s| s >= m))
+            })
+            .filter(|h| {
+                let Some(max_rate) = args.max_rate_per_night else {
+                    return true;
+                };
+                // max_rate is in major units; compare against per_night_minor / 100.
+                h.lowest_per_night_minor_units
+                    .map_or(true, |m| (m as f64) / 100.0 <= max_rate)
             })
             .take(max_results)
             .collect();
 
-        // Sort by lowest nightly rate (cheapest first)
-        hotels.sort_by(|a, b| {
-            let ra = a.lowest_rate.as_ref().map(|r| r.amount).unwrap_or(f64::MAX);
-            let rb = b.lowest_rate.as_ref().map(|r| r.amount).unwrap_or(f64::MAX);
-            ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        hotels.sort_by_key(|h| h.lowest_per_night_minor_units.unwrap_or(i64::MAX));
 
         info!(
             destination = %args.destination,
-            nights,
             count = hotels.len(),
+            nights,
             "hotel search complete"
         );
 

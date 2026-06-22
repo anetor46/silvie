@@ -315,3 +315,175 @@ impl PaymentClient {
         Ok(())
     }
 }
+
+// ── PaymentIntent (customer-PM pre-charge) ───────────────────────────────────
+//
+// We use a manual-capture PaymentIntent on the user's saved PM as a hold
+// against the booking amount. The Issuing virtual card is what actually pays
+// the supplier — the PaymentIntent moves money from the user's card to our
+// Stripe balance. Order is: create intent (hold) → book → capture-or-cancel.
+
+#[derive(Deserialize, Debug)]
+pub struct StripePaymentIntent {
+    pub id: String,
+    pub status: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub amount: Option<i64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub currency: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct StripeRefund {
+    pub id: String,
+    pub status: String,
+    #[serde(default)]
+    pub amount: Option<i64>,
+}
+
+impl PaymentClient {
+    /// Create a manual-capture PaymentIntent against the customer's saved
+    /// payment method and confirm it immediately. On success the intent is in
+    /// `requires_capture` — funds are held. Use [`capture_intent`] to charge,
+    /// or [`cancel_intent`] to release.
+    ///
+    /// Caller surfaces `requires_action` / 3DS as a clean error — we do not
+    /// currently flow the SCA challenge through chat.
+    #[instrument(skip(self), fields(
+        stripe_key_len = self.stripe_key.len(),
+        customer_id,
+        amount_minor_units,
+        currency
+    ))]
+    pub async fn create_and_confirm_intent(
+        &self,
+        customer_id: &str,
+        payment_method_id: &str,
+        amount_minor_units: u64,
+        currency: &str,
+        metadata: &[(&str, &str)],
+    ) -> Result<StripePaymentIntent> {
+        let amount_str = amount_minor_units.to_string();
+        let mut form: Vec<(String, String)> = vec![
+            ("amount".into(), amount_str),
+            ("currency".into(), currency.to_string()),
+            ("customer".into(), customer_id.to_string()),
+            ("payment_method".into(), payment_method_id.to_string()),
+            ("payment_method_types[]".into(), "card".into()),
+            ("capture_method".into(), "manual".into()),
+            ("off_session".into(), "true".into()),
+            ("confirm".into(), "true".into()),
+        ];
+        for (k, v) in metadata {
+            form.push((format!("metadata[{k}]"), (*v).to_string()));
+        }
+
+        let resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/payment_intents"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .form(&form)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body = resp.text().await?;
+        debug!("Stripe PaymentIntent create status: {status}");
+        if !status.is_success() {
+            error!("Stripe PaymentIntent error ({status}): {body}");
+            return Err(anyhow!("Stripe PaymentIntent failed: HTTP {status}: {body}"));
+        }
+
+        let intent: StripePaymentIntent = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse PaymentIntent: {e}"))?;
+
+        if intent.status != "requires_capture" {
+            return Err(anyhow!(
+                "PaymentIntent {} ended in status '{}' — booking requires an authorisation hold",
+                intent.id,
+                intent.status
+            ));
+        }
+        info!(intent_id = %intent.id, "PaymentIntent authorised (held)");
+        Ok(intent)
+    }
+
+    /// Capture a previously-authorised PaymentIntent. Charges the customer
+    /// for the booking amount.
+    #[instrument(skip(self), fields(stripe_key_len = self.stripe_key.len(), intent_id))]
+    pub async fn capture_intent(&self, intent_id: &str) -> Result<StripePaymentIntent> {
+        let resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/payment_intents/{intent_id}/capture"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        debug!("Stripe PaymentIntent capture status: {status}");
+        if !status.is_success() {
+            error!("Stripe capture error ({status}): {body}");
+            return Err(anyhow!("Stripe capture failed: HTTP {status}: {body}"));
+        }
+        let intent: StripePaymentIntent = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse captured PaymentIntent: {e}"))?;
+        info!(intent_id = %intent.id, status = %intent.status, "PaymentIntent captured");
+        Ok(intent)
+    }
+
+    /// Cancel an authorised but uncaptured PaymentIntent. Releases the hold.
+    #[instrument(skip(self), fields(stripe_key_len = self.stripe_key.len(), intent_id))]
+    pub async fn cancel_intent(&self, intent_id: &str) -> Result<StripePaymentIntent> {
+        let resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/payment_intents/{intent_id}/cancel"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        debug!("Stripe PaymentIntent cancel status: {status}");
+        if !status.is_success() {
+            error!("Stripe cancel-intent error ({status}): {body}");
+            return Err(anyhow!("Stripe cancel-intent failed: HTTP {status}: {body}"));
+        }
+        let intent: StripePaymentIntent = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse cancelled PaymentIntent: {e}"))?;
+        info!(intent_id = %intent.id, "PaymentIntent cancelled (hold released)");
+        Ok(intent)
+    }
+
+    /// Refund (part of) a captured PaymentIntent. Used during hotel
+    /// cancellations when the supplier policy allows.
+    #[instrument(skip(self), fields(stripe_key_len = self.stripe_key.len(), intent_id, amount_minor_units))]
+    pub async fn refund_intent(
+        &self,
+        intent_id: &str,
+        amount_minor_units: u64,
+    ) -> Result<StripeRefund> {
+        let amount_str = amount_minor_units.to_string();
+        let resp = self
+            .http_client
+            .post(format!("{STRIPE_API_BASE}/refunds"))
+            .basic_auth(&self.stripe_key, Some(""))
+            .form(&[
+                ("payment_intent", intent_id),
+                ("amount", amount_str.as_str()),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        debug!("Stripe refund status: {status}");
+        if !status.is_success() {
+            error!("Stripe refund error ({status}): {body}");
+            return Err(anyhow!("Stripe refund failed: HTTP {status}: {body}"));
+        }
+        let refund: StripeRefund = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("Failed to parse refund: {e}"))?;
+        info!(refund_id = %refund.id, status = %refund.status, "refund created");
+        Ok(refund)
+    }
+}

@@ -47,10 +47,20 @@ pub struct StripeConfig {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // wired through in the LlmClient refactor (Slice 3)
 pub struct TravelportCredentials {
     pub client_id: String,
     pub client_secret: String,
+    /// Travelport's OAuth uses the **password** grant — username and password
+    /// are issued by Travelport alongside the API client_id/client_secret and
+    /// must be included in every token request.
+    pub username: String,
+    pub password: String,
+    /// `dev` (pre-prod sandbox, default) or `prod`. Parsed leniently —
+    /// unknown values fall back to `dev` with a warn log.
+    pub env: String,
+    /// Travelport branch / access-group identifier (sent on every request
+    /// as the `XAUTH_TRAVELPORT_ACCESSGROUP` header).
+    pub pcc: String,
 }
 
 impl Config {
@@ -71,12 +81,27 @@ impl Config {
             outlook_oauth: optional("OUTLOOK_CLIENT_ID")
                 .map(|client_id| OutlookOAuthCredentials { client_id }),
             stripe: optional("STRIPE_SECRET_KEY").map(|secret_key| StripeConfig { secret_key }),
-            travelport: optional_pair("TRAVELPORT_CLIENT_ID", "TRAVELPORT_CLIENT_SECRET").map(
-                |(client_id, client_secret)| TravelportCredentials {
-                    client_id,
-                    client_secret,
-                },
-            ),
+            // Travelport requires the full quartet (client_id + client_secret
+            // + username + password) for the password-grant OAuth flow. If any
+            // of the four are missing the integration stays disabled.
+            travelport: match (
+                optional("TRAVELPORT_CLIENT_ID"),
+                optional("TRAVELPORT_CLIENT_SECRET"),
+                optional("TRAVELPORT_USERNAME"),
+                optional("TRAVELPORT_PASSWORD"),
+            ) {
+                (Some(client_id), Some(client_secret), Some(username), Some(password)) => {
+                    Some(TravelportCredentials {
+                        client_id,
+                        client_secret,
+                        username,
+                        password,
+                        env: optional("TRAVELPORT_ENV").unwrap_or_else(|| "dev".to_string()),
+                        pcc: optional("TRAVELPORT_PCC").unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            },
         })
     }
 }

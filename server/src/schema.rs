@@ -153,6 +153,33 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    hotel_bookings (id) {
+        id -> Uuid,
+        user_id -> Uuid,
+        conversation_id -> Nullable<Uuid>,
+        travelport_reservation_id -> Nullable<Text>,
+        travelport_property_id -> Text,
+        travelport_offer_id -> Nullable<Text>,
+        hotel_name -> Text,
+        check_in -> Date,
+        check_out -> Date,
+        guests -> Int4,
+        rooms -> Int4,
+        total_amount_minor_units -> Int8,
+        currency -> Text,
+        cancellation_policy -> Nullable<Jsonb>,
+        status -> Text,
+        failure_reason -> Nullable<Text>,
+        payment_method_id -> Nullable<Text>,
+        stripe_payment_intent_id -> Nullable<Text>,
+        refunded_amount_minor_units -> Nullable<Int8>,
+        created_at -> Timestamptz,
+        confirmed_at -> Nullable<Timestamptz>,
+        cancelled_at -> Nullable<Timestamptz>,
+    }
+}
+
 diesel::joinable!(user_profiles -> users (user_id));
 diesel::joinable!(addresses -> users (user_id));
 diesel::joinable!(travel_documents -> users (user_id));
@@ -163,6 +190,8 @@ diesel::joinable!(issuing_card_log -> payment_methods (payment_method_id));
 diesel::joinable!(integrations -> users (user_id));
 diesel::joinable!(conversations -> users (user_id));
 diesel::joinable!(messages -> conversations (conversation_id));
+diesel::joinable!(hotel_bookings -> users (user_id));
+diesel::joinable!(hotel_bookings -> conversations (conversation_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     users,
@@ -174,4 +203,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     integrations,
     conversations,
     messages,
+    hotel_bookings,
 );

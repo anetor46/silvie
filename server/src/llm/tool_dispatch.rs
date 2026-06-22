@@ -18,7 +18,7 @@ use rig::tool::Tool;
 use serde::Serialize;
 use tracing::error;
 
-use crate::config::{Config, StripeConfig, TravelportCredentials};
+use crate::config::{Config, StripeConfig};
 use crate::db::DbPool;
 use crate::llm::context::{StripePaymentRefs, ToolAuth};
 use crate::tools::gmail::{ReplyToEmailTool, SendEmailTool};
@@ -29,7 +29,7 @@ use crate::tools::outlook::{
     CreateOutlookEventTool, DeleteOutlookEventTool, ReplyOutlookEmailTool, RespondOutlookEventTool,
     SendOutlookEmailTool, UpdateOutlookEventTool,
 };
-use crate::tools::travelport::HotelBookTool;
+use crate::tools::travelport::{HotelBookTool, HotelBookToolDeps, HotelCancelBookingTool};
 
 /// Result of a deferred tool execution. Both fields end up in the DB row's
 /// updated payload + the SSE `ToolResult` event the frontend sees.
@@ -119,7 +119,7 @@ pub async fn execute_pending(
                 .stripe
                 .as_ref()
                 .ok_or_else(|| anyhow!("Stripe is not configured"))?;
-            let tp: &TravelportCredentials = config
+            let tp = tool_auth
                 .travelport
                 .as_ref()
                 .ok_or_else(|| anyhow!("Travelport is not configured"))?;
@@ -127,13 +127,37 @@ pub async fn execute_pending(
                 .stripe_payment
                 .as_ref()
                 .ok_or_else(|| anyhow!("no saved payment method on file"))?;
-            let tool = HotelBookTool::new(
-                tp.client_id.clone(),
-                tp.client_secret.clone(),
+            let user_id = tool_auth
+                .user_id
+                .ok_or_else(|| anyhow!("authenticated user missing from tool auth"))?;
+            let tool = HotelBookTool::new(HotelBookToolDeps {
+                travelport: tp.clone(),
+                stripe_key: stripe.secret_key.clone(),
+                customer_id: pm.customer_id.clone(),
+                payment_method_id: pm.payment_method_id.clone(),
+                user_id,
+                conversation_id: tool_auth.conversation_id,
+                db_pool: db_pool.clone(),
+            });
+            run(&tool, args_json).await
+        }
+        "hotel_cancel_booking" => {
+            let stripe: &StripeConfig = config
+                .stripe
+                .as_ref()
+                .ok_or_else(|| anyhow!("Stripe is not configured"))?;
+            let tp = tool_auth
+                .travelport
+                .as_ref()
+                .ok_or_else(|| anyhow!("Travelport is not configured"))?;
+            let user_id = tool_auth
+                .user_id
+                .ok_or_else(|| anyhow!("authenticated user missing from tool auth"))?;
+            let tool = HotelCancelBookingTool::new(
+                tp.clone(),
                 stripe.secret_key.clone(),
-                pm.customer_id.clone(),
-                pm.payment_method_id.clone(),
                 db_pool.clone(),
+                user_id,
             );
             run(&tool, args_json).await
         }

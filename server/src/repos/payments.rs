@@ -348,6 +348,8 @@ pub async fn log_issuing_card_creation(
     stripe_card_id: &str,
     amount_minor_units: i64,
     currency: &str,
+    entity_type: Option<&str>,
+    entity_id: Option<Uuid>,
 ) -> Result<()> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
 
@@ -377,6 +379,8 @@ pub async fn log_issuing_card_creation(
             issuing_card_log::stripe_issuing_card_id.eq(stripe_card_id),
             issuing_card_log::amount_minor_units.eq(amount_minor_units),
             issuing_card_log::currency.eq(&currency_uc),
+            issuing_card_log::entity_type.eq(entity_type),
+            issuing_card_log::entity_id.eq(entity_id),
         ))
         .execute(&mut conn)
         .await

@@ -20,13 +20,21 @@ export type WidgetKind =
   | 'calendar_event_update'
   | 'calendar_event_delete'
   | 'calendar_event_respond'
-  | 'hotel_book';
+  | 'hotel_book'
+  | 'hotel_cancel'
+  | 'hotel_search_results'
+  | 'hotel_book_result'
+  | 'hotel_booking_summary';
 
 export interface ToolInfo {
   label: string;
   verb: string;
   icon: string;
+  /** Component to render for the args preview (proposal card for write tools,
+   *  inline expansion for any tool). */
   widget?: WidgetKind;
+  /** Component to render against `toolCall.output` once the call succeeds. */
+  resultWidget?: WidgetKind;
   brief?: (args: Record<string, unknown>) => string;
 }
 
@@ -132,6 +140,7 @@ export const TOOL_INFO: Record<string, ToolInfo> = {
     label: 'Searching hotels',
     verb: 'Searching',
     icon: 'building',
+    resultWidget: 'hotel_search_results',
     brief: (a) => {
       const dest = asString(a.destination);
       const checkIn = asString(a.check_in);
@@ -143,6 +152,39 @@ export const TOOL_INFO: Record<string, ToolInfo> = {
       }
       if (dest) return `Searching hotels in ${dest}${guests}.`;
       return 'Searching for available hotels.';
+    },
+  },
+  hotel_details: {
+    label: 'Hotel details',
+    verb: 'Looking up',
+    icon: 'building',
+    brief: (a) => {
+      const id = asString(a.property_id);
+      return id ? `Looking up details for property ${id}.` : 'Looking up hotel details.';
+    },
+  },
+  hotel_availability: {
+    label: 'Refreshing rates',
+    verb: 'Refreshing',
+    icon: 'clock',
+    brief: (a) => {
+      const id = asString(a.property_id);
+      const checkIn = asString(a.check_in);
+      const checkOut = asString(a.check_out);
+      if (id && checkIn && checkOut) {
+        return `Refreshing live rates for ${id}, ${fmtDateOnly(checkIn)} → ${fmtDateOnly(checkOut)}.`;
+      }
+      return 'Refreshing live rates for the selected hotel.';
+    },
+  },
+  hotel_retrieve_booking: {
+    label: 'Looking up booking',
+    verb: 'Looking up',
+    icon: 'bed',
+    resultWidget: 'hotel_booking_summary',
+    brief: (a) => {
+      const id = asString(a.booking_id);
+      return id ? `Looking up booking ${id.slice(0, 8)}…` : 'Looking up your hotel booking.';
     },
   },
 
@@ -188,6 +230,13 @@ export const TOOL_INFO: Record<string, ToolInfo> = {
     verb: 'Booking',
     icon: 'bed',
     widget: 'hotel_book',
+    resultWidget: 'hotel_book_result',
+  },
+  hotel_cancel_booking: {
+    label: 'Cancelling booking',
+    verb: 'Cancelling',
+    icon: 'calendar-x',
+    widget: 'hotel_cancel',
   },
 };
 
