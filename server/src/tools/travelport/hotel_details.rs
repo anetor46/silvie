@@ -5,7 +5,7 @@ use tracing::instrument;
 
 use super::client::TravelportClient;
 use super::error::TravelportError;
-use super::models::HotelDetails;
+use super::models::{split_property_id, HotelDetails};
 
 const DESCRIPTION: &str = include_str!("../../../prompts/travelport/hotel_details.md");
 
@@ -21,7 +21,7 @@ impl HotelDetailsTool {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HotelDetailsArgs {
-    /// Property ID returned by `hotel_search` (carry verbatim).
+    /// Composite property id from `hotel_search` (e.g. "DT-35429").
     pub property_id: String,
 }
 
@@ -40,7 +40,7 @@ impl Tool for HotelDetailsTool {
                 "type": "object",
                 "required": ["property_id"],
                 "properties": {
-                    "property_id": { "type": "string", "description": "Property ID from hotel_search." }
+                    "property_id": { "type": "string", "description": "Composite property id from hotel_search (chainCode-propertyCode)." }
                 }
             }),
         }
@@ -48,20 +48,46 @@ impl Tool for HotelDetailsTool {
 
     #[instrument(skip(self), fields(property_id = %args.property_id))]
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let resp = self.client.hotel_details(&args.property_id).await?;
-        let (line, city) = resp
+        let (chain, code) = split_property_id(&args.property_id).ok_or_else(|| {
+            TravelportError::InvalidArg(format!(
+                "property_id '{}' is not in 'chainCode-propertyCode' form",
+                args.property_id
+            ))
+        })?;
+        let resp = self.client.hotel_details(&chain, &code).await?;
+        let info = resp
+            .properties_response
+            .and_then(|p| p.properties)
+            .and_then(|p| p.property_info.into_iter().next())
+            .ok_or_else(|| {
+                TravelportError::Parse("details response contained no PropertyInfo".into())
+            })?;
+        let property = info.property.ok_or_else(|| {
+            TravelportError::Parse("details response missing Property body".into())
+        })?;
+        let (address, city) = property
             .address
-            .map(|a| (a.line.unwrap_or_default(), a.city.unwrap_or_default()))
+            .map(|a| (a.address_line.join(", "), a.city.unwrap_or_default()))
             .unwrap_or_default();
+        let amenities = property
+            .property_amenity
+            .into_iter()
+            .filter_map(|a| a.description)
+            .collect();
+        let photos = property
+            .image
+            .into_iter()
+            .filter_map(|i| i.value)
+            .collect();
+
         Ok(HotelDetails {
-            property_id: resp.property_id.unwrap_or(args.property_id),
-            name: resp.name.unwrap_or_default(),
-            description: resp.description,
-            amenities: resp.amenities,
-            photos: resp.photos,
-            address: line,
+            property_id: args.property_id,
+            name: property.name.unwrap_or_default(),
+            description: None,
+            amenities,
+            photos,
+            address,
             city,
-            policies: resp.policies,
         })
     }
 }

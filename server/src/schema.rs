@@ -159,6 +159,7 @@ diesel::table! {
         user_id -> Uuid,
         conversation_id -> Nullable<Uuid>,
         travelport_reservation_id -> Nullable<Text>,
+        travelport_supplier_locator -> Nullable<Text>,
         travelport_property_id -> Text,
         travelport_offer_id -> Nullable<Text>,
         hotel_name -> Text,

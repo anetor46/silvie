@@ -12,7 +12,11 @@ use crate::services::stripe::PaymentClient;
 
 use super::client::TravelportClient;
 use super::error::TravelportError;
-use super::models::{BookFormOfPayment, BookReq};
+use super::models::{
+    BookReq, BuildFromCatalogOfferingHospitality, EmailValue, FormOfPaymentPaymentCard,
+    MoneyAmountOut, Payment, PaymentCardDetail, PersonName, PlainTextField, ReservationBuild,
+    ReservationQueryBuild, ReservationResp, Traveler, Value,
+};
 
 const DESCRIPTION: &str = include_str!("../../../prompts/travelport/hotel_book.md");
 
@@ -52,38 +56,39 @@ impl HotelBookTool {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HotelBookArgs {
-    /// Property ID from `hotel_search`.
+    /// Composite property id from `hotel_search` ("chainCode-propertyCode").
     pub property_id: String,
-    /// Offer ID from `hotel_availability` (rate is freshest there).
+    /// CatalogOffering identifier from `hotel_availability.rates[].offer_id`.
     pub offer_id: String,
-    /// Rate ID from `hotel_availability`.
+    /// `bookingCode` from `hotel_availability.rates[].rate_id`.
     pub rate_id: String,
     pub hotel_name: String,
     pub check_in: String,
     pub check_out: String,
-    /// Number of guests on the reservation.
     pub guests: u32,
-    /// Lead guest full name (required by the GDS).
-    pub guest_name: String,
+    /// Lead guest first name (Traveler.PersonName.Given).
+    pub guest_given_name: String,
+    /// Lead guest surname (Traveler.PersonName.Surname).
+    pub guest_surname: String,
     pub guest_email: Option<String>,
-    /// Stay total in the currency's smallest unit (e.g. cents). Multiply
-    /// displayed price by 100 for USD/EUR/GBP.
+    /// Stay total in the currency's smallest unit (cents for USD/EUR/GBP).
     pub total_price_minor_units: u64,
-    /// ISO 4217 currency code, uppercase ("USD", "EUR", "GBP").
     pub currency: String,
 }
 
 #[derive(Serialize)]
 pub struct HotelBookOutput {
     pub booking_id: Uuid,
+    /// AggregatorLocatorCode — what we feed into retrieve/cancel.
     pub reservation_id: String,
+    /// Supplier-side locator (sourceContext=Supplier in the Receipt).
+    pub supplier_locator: Option<String>,
     pub hotel_name: String,
     pub check_in: String,
     pub check_out: String,
     pub total_charged_minor_units: u64,
     pub currency: String,
     pub status: String,
-    pub refundable: bool,
 }
 
 impl Tool for HotelBookTool {
@@ -101,21 +106,23 @@ impl Tool for HotelBookTool {
                 "type": "object",
                 "required": [
                     "property_id", "offer_id", "rate_id", "hotel_name",
-                    "check_in", "check_out", "guests", "guest_name",
+                    "check_in", "check_out", "guests",
+                    "guest_given_name", "guest_surname",
                     "total_price_minor_units", "currency"
                 ],
                 "properties": {
-                    "property_id":   { "type": "string" },
-                    "offer_id":      { "type": "string" },
-                    "rate_id":       { "type": "string" },
-                    "hotel_name":    { "type": "string" },
-                    "check_in":      { "type": "string", "description": "YYYY-MM-DD" },
-                    "check_out":     { "type": "string", "description": "YYYY-MM-DD" },
-                    "guests":        { "type": "integer", "minimum": 1 },
-                    "guest_name":    { "type": "string", "description": "Lead guest full name." },
-                    "guest_email":   { "type": "string" },
-                    "total_price_minor_units": { "type": "integer", "minimum": 1, "description": "Stay total in minor units (multiply USD/EUR/GBP by 100)." },
-                    "currency":      { "type": "string", "enum": ["USD", "EUR", "GBP"] }
+                    "property_id":       { "type": "string", "description": "Composite property id from hotel_search." },
+                    "offer_id":          { "type": "string", "description": "CatalogOffering identifier (Identifier.value) from hotel_availability." },
+                    "rate_id":           { "type": "string", "description": "bookingCode from hotel_availability." },
+                    "hotel_name":        { "type": "string" },
+                    "check_in":          { "type": "string", "description": "YYYY-MM-DD" },
+                    "check_out":         { "type": "string", "description": "YYYY-MM-DD" },
+                    "guests":            { "type": "integer", "minimum": 1 },
+                    "guest_given_name":  { "type": "string", "description": "Lead guest first name." },
+                    "guest_surname":     { "type": "string", "description": "Lead guest surname." },
+                    "guest_email":       { "type": "string" },
+                    "total_price_minor_units": { "type": "integer", "minimum": 1 },
+                    "currency":          { "type": "string", "enum": ["USD", "EUR", "GBP"] }
                 }
             }),
         }
@@ -144,7 +151,7 @@ impl Tool for HotelBookTool {
             )));
         }
 
-        // Step 1: persist a pending booking row so we have our own id.
+        // Step 1: persist a pending row so we own the id immediately.
         let booking_id = hotel_bookings::insert_pending(
             &self.db_pool,
             hotel_bookings::InsertPending {
@@ -170,7 +177,7 @@ impl Tool for HotelBookTool {
 
         let payment_client = PaymentClient::new(self.stripe_key.clone());
 
-        // Step 2: authorise the customer's PM for the booking amount.
+        // Step 2: authorise the user's stored PM for the booking amount.
         let intent = match payment_client
             .create_and_confirm_intent(
                 &self.customer_id,
@@ -195,7 +202,7 @@ impl Tool for HotelBookTool {
             warn!("failed to attach payment intent {} to booking {booking_id}: {e:#}", intent.id);
         }
 
-        // Step 3: issue the single-use virtual card Travelport will charge.
+        // Step 3: issue the virtual card.
         let card = match payment_client
             .create_booking_card(
                 &self.customer_id,
@@ -229,24 +236,68 @@ impl Tool for HotelBookTool {
             warn!("failed to record issuing_card_log entry for {card_id}: {e:#}");
         }
 
-        // Step 4: submit the Travelport reservation.
-        let book_req = BookReq {
-            property_id: &args.property_id,
-            offer_id: &args.offer_id,
-            rate_id: &args.rate_id,
-            check_in: &args.check_in,
-            check_out: &args.check_out,
-            guests: args.guests,
-            guest_name: &args.guest_name,
-            guest_email: args.guest_email.as_deref(),
-            form_of_payment: BookFormOfPayment {
-                card_number: &card.pan,
-                exp_month: card.exp_month,
-                exp_year: card.exp_year,
-                cvv: &card.cvv,
+        // Step 4: submit the Travelport reservation (reference payload).
+        let total_major = (args.total_price_minor_units as f64) / 100.0;
+        let card_code = travelport_card_code(card.pan.as_str());
+        let expire = format!("{:02}{:02}", card.exp_month, card.exp_year % 100);
+        let card_holder = format!("{} {}", args.guest_given_name, args.guest_surname);
+
+        let email_vec = args
+            .guest_email
+            .as_deref()
+            .map(|e| vec![EmailValue { value: e.to_string() }])
+            .unwrap_or_default();
+
+        let req = BookReq {
+            query: ReservationQueryBuild {
+                type_: "ReservationQueryBuild",
+                reservation_build: ReservationBuild {
+                    type_: "ReservationBuildFromCatalogOffering",
+                    build_from: BuildFromCatalogOfferingHospitality {
+                        type_: "BuildFromCatalogOfferingHospitality",
+                        catalog_offering_identifier: Value {
+                            value: args.offer_id.clone(),
+                        },
+                    },
+                    traveler: vec![Traveler {
+                        type_: "Traveler",
+                        person_name: PersonName {
+                            given: args.guest_given_name.clone(),
+                            surname: args.guest_surname.clone(),
+                        },
+                        email: email_vec,
+                    }],
+                    form_of_payment: vec![FormOfPaymentPaymentCard {
+                        type_: "FormOfPaymentPaymentCard",
+                        payment_card: PaymentCardDetail {
+                            type_: "PaymentCardDetail",
+                            expire_date: expire,
+                            card_type: "Credit",
+                            card_code,
+                            card_holder_name: card_holder,
+                            card_number: PlainTextField {
+                                type_: "CardNumber",
+                                plain_text: card.pan.clone(),
+                            },
+                            series_code: PlainTextField {
+                                type_: "SeriesCode",
+                                plain_text: card.cvv.clone(),
+                            },
+                        },
+                    }],
+                    payment: vec![Payment {
+                        type_: "Payment",
+                        amount: MoneyAmountOut {
+                            code: currency.clone(),
+                            value: total_major,
+                        },
+                        guarantee_ind: true,
+                        deposit_ind: false,
+                    }],
+                },
             },
         };
-        let book_outcome = self.travelport.book(book_req).await;
+        let book_outcome = self.travelport.book(req).await;
 
         // Step 5: cancel the issuing card regardless of outcome.
         if let Err(e) = payment_client.cancel_issuing_card(&card_id).await {
@@ -258,23 +309,17 @@ impl Tool for HotelBookTool {
 
         match book_outcome {
             Ok(resp) => {
-                let reservation_id = resp
-                    .reservation_id
-                    .ok_or_else(|| TravelportError::Parse("missing reservation id".into()))?;
-                let refundable = resp
-                    .cancellation_policy
-                    .as_ref()
-                    .and_then(|p| p.refundable)
-                    .unwrap_or(false);
-                let policy_json = resp.cancellation_policy.as_ref().and_then(|p| {
-                    serde_json::to_value(p.clone().into_domain(&currency)).ok()
-                });
+                let (aggregator, supplier) = extract_locators(&resp);
+                let aggregator = aggregator.ok_or_else(|| {
+                    TravelportError::Parse(
+                        "booking response missing aggregator (Travelport) locator".into(),
+                    )
+                })?;
 
-                // Capture the pre-auth.
                 if let Err(e) = payment_client.capture_intent(&intent.id).await {
                     warn!("Travelport booking succeeded but PaymentIntent capture failed: {e:#}");
                     let reason = format!(
-                        "booking confirmed at supplier ({reservation_id}) but payment capture failed: {e}"
+                        "booking confirmed at supplier ({aggregator}) but payment capture failed: {e}"
                     );
                     let _ = mark_failed(&self.db_pool, booking_id, &reason).await;
                     return Err(TravelportError::InvalidArg(reason));
@@ -283,8 +328,9 @@ impl Tool for HotelBookTool {
                 if let Err(e) = mark_confirmed(
                     &self.db_pool,
                     booking_id,
-                    &reservation_id,
-                    policy_json,
+                    &aggregator,
+                    supplier.as_deref(),
+                    None,
                 )
                 .await
                 {
@@ -293,30 +339,91 @@ impl Tool for HotelBookTool {
 
                 info!(
                     booking_id = %booking_id,
-                    reservation_id = %reservation_id,
+                    aggregator_locator = %aggregator,
+                    supplier_locator = ?supplier,
                     "hotel booking confirmed"
                 );
+
+                let status = resp
+                    .reservation_response
+                    .as_ref()
+                    .and_then(|r| r.receipt.first())
+                    .and_then(|r| r.confirmation.as_ref())
+                    .and_then(|c| c.offer_status.as_ref())
+                    .and_then(|s| s.status.clone())
+                    .unwrap_or_else(|| "Confirmed".into());
+
                 Ok(HotelBookOutput {
                     booking_id,
-                    reservation_id,
+                    reservation_id: aggregator,
+                    supplier_locator: supplier,
                     hotel_name: args.hotel_name,
                     check_in: args.check_in,
                     check_out: args.check_out,
                     total_charged_minor_units: args.total_price_minor_units,
                     currency,
-                    status: resp.status.unwrap_or_else(|| "confirmed".into()),
-                    refundable,
+                    status,
                 })
             }
             Err(e) => {
-                // Booking failed — release the hold so we don't charge the customer.
                 if let Err(cancel_err) = payment_client.cancel_intent(&intent.id).await {
-                    warn!("failed to release PaymentIntent {} after booking failure: {cancel_err:#}", intent.id);
+                    warn!(
+                        "failed to release PaymentIntent {} after booking failure: {cancel_err:#}",
+                        intent.id
+                    );
                 }
                 let reason = format!("Travelport booking failed: {e}");
                 let _ = mark_failed(&self.db_pool, booking_id, &reason).await;
                 Err(e)
             }
         }
+    }
+}
+
+/// Pull (aggregator, supplier) locators out of a Travelport reservation
+/// response. The same response shape is returned by Book, Retrieve and Cancel,
+/// with each receipt's `sourceContext` saying which one it is.
+fn extract_locators(resp: &ReservationResp) -> (Option<String>, Option<String>) {
+    let Some(inner) = resp.reservation_response.as_ref() else {
+        return (None, None);
+    };
+    let mut aggregator = None;
+    let mut supplier = None;
+    for receipt in &inner.receipt {
+        let Some(conf) = receipt.confirmation.as_ref() else {
+            continue;
+        };
+        let Some(loc) = conf.locator.as_ref() else {
+            continue;
+        };
+        let Some(value) = loc.value.as_ref() else {
+            continue;
+        };
+        match loc.source_context.as_deref() {
+            Some("Travelport") => {
+                if aggregator.is_none() {
+                    aggregator = Some(value.clone());
+                }
+            }
+            Some("Supplier") => {
+                if supplier.is_none() {
+                    supplier = Some(value.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    (aggregator, supplier)
+}
+
+/// Map the Stripe-Issuing card brand to Travelport's two-letter card code.
+fn travelport_card_code(pan: &str) -> String {
+    let first = pan.chars().next().unwrap_or('0');
+    match first {
+        '4' => "VI".into(),     // Visa
+        '5' | '2' => "CA".into(), // Mastercard
+        '3' => "AX".into(),     // American Express
+        '6' => "DS".into(),     // Discover
+        _ => "VI".into(),
     }
 }

@@ -377,7 +377,7 @@ pub async fn build_tool_auth(
             username: tp.username.clone(),
             password: tp.password.clone(),
             env: TravelportEnv::parse(&tp.env),
-            pcc: tp.pcc.clone(),
+            access_group: tp.access_group.clone(),
         })
     });
 

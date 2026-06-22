@@ -40,11 +40,7 @@ impl HotelCancelBookingTool {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HotelCancelBookingArgs {
-    /// Our booking id (UUID).
     pub booking_id: Uuid,
-    /// Belt-and-braces: must be `true` (the LLM also needs to confirm via the
-    /// write-tool harness; this prevents accidental cancellation if the LLM
-    /// invokes the tool without explicit user consent).
     pub confirm: bool,
 }
 
@@ -74,7 +70,7 @@ impl Tool for HotelCancelBookingTool {
                 "required": ["booking_id", "confirm"],
                 "properties": {
                     "booking_id": { "type": "string", "description": "Booking UUID returned by hotel_book." },
-                    "confirm":    { "type": "boolean", "description": "Must be true — explicit user confirmation that the cancellation should proceed." }
+                    "confirm":    { "type": "boolean", "description": "Must be true — explicit user confirmation." }
                 }
             }),
         }
@@ -98,8 +94,13 @@ impl Tool for HotelCancelBookingTool {
                 row.status
             )));
         }
-        let reservation_id = row.travelport_reservation_id.clone().ok_or_else(|| {
-            TravelportError::InvalidArg("booking has no Travelport reservation id".into())
+        let aggregator = row.travelport_reservation_id.clone().ok_or_else(|| {
+            TravelportError::InvalidArg("booking has no aggregator locator".into())
+        })?;
+        let supplier = row.travelport_supplier_locator.clone().ok_or_else(|| {
+            TravelportError::InvalidArg(
+                "booking has no supplier locator — cannot satisfy Travelport's cancel query parameter".into(),
+            )
         })?;
 
         let policy: Option<CancellationPolicy> = row
@@ -109,11 +110,9 @@ impl Tool for HotelCancelBookingTool {
         let refundable_minor = compute_refundable_minor(&policy, row.total_amount_minor_units);
 
         // Cancel at the supplier first.
-        let cancel_resp = self.travelport.cancel(&reservation_id).await?;
+        self.travelport.cancel(&aggregator, &supplier).await?;
 
-        // Issue the refund (if any). Best-effort: even if refund fails we
-        // still want the booking marked cancelled at our side; the user
-        // will see the discrepancy and can ask us to retry.
+        // Refund (best-effort).
         let mut refunded = 0_i64;
         if refundable_minor > 0 {
             if let Some(intent_id) = row.stripe_payment_intent_id.as_deref() {
@@ -140,7 +139,7 @@ impl Tool for HotelCancelBookingTool {
         let now = Utc::now().to_rfc3339();
         Ok(HotelCancelBookingOutput {
             booking_id: row.id,
-            status: cancel_resp.status.unwrap_or_else(|| "cancelled".into()),
+            status: "cancelled".into(),
             cancelled_at: now,
             refunded_amount_minor_units: refunded,
             currency: row.currency,
@@ -149,9 +148,6 @@ impl Tool for HotelCancelBookingTool {
     }
 }
 
-/// Refundable amount in minor units. The simple model: if the policy is
-/// refundable and we're before the deadline (or no deadline given), refund
-/// the full total minus any quoted penalty. Otherwise no refund.
 fn compute_refundable_minor(
     policy: &Option<CancellationPolicy>,
     total_minor: i64,

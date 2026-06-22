@@ -58,9 +58,10 @@ pub struct TravelportCredentials {
     /// `dev` (pre-prod sandbox, default) or `prod`. Parsed leniently —
     /// unknown values fall back to `dev` with a warn log.
     pub env: String,
-    /// Travelport branch / access-group identifier (sent on every request
-    /// as the `XAUTH_TRAVELPORT_ACCESSGROUP` header).
-    pub pcc: String,
+    /// Travelport access-group UUID (sent on every request as the
+    /// `XAUTH_TRAVELPORT_ACCESSGROUP` header). Issued in Travelport's
+    /// welcome letter. Example shape: `36CFECCB-9A27-4A78-8B4D-7272F3830C20`.
+    pub access_group: String,
 }
 
 impl Config {
@@ -97,7 +98,7 @@ impl Config {
                         username,
                         password,
                         env: optional("TRAVELPORT_ENV").unwrap_or_else(|| "dev".to_string()),
-                        pcc: optional("TRAVELPORT_PCC").unwrap_or_default(),
+                        access_group: optional("TRAVELPORT_ACCESS_GROUP").unwrap_or_default(),
                     })
                 }
                 _ => None,

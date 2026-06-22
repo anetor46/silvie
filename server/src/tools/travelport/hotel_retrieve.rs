@@ -5,7 +5,7 @@ use tracing::{instrument, warn};
 use uuid::Uuid;
 
 use crate::db::DbPool;
-use crate::repos::hotel_bookings::{self};
+use crate::repos::hotel_bookings;
 
 use super::client::TravelportClient;
 use super::error::TravelportError;
@@ -31,7 +31,6 @@ impl HotelRetrieveBookingTool {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HotelRetrieveBookingArgs {
-    /// Our booking id (UUID) — returned by `hotel_book`.
     pub booking_id: Uuid,
 }
 
@@ -39,6 +38,7 @@ pub struct HotelRetrieveBookingArgs {
 pub struct HotelRetrieveBookingOutput {
     pub booking_id: Uuid,
     pub reservation_id: Option<String>,
+    pub supplier_locator: Option<String>,
     pub hotel_name: String,
     pub check_in: String,
     pub check_out: String,
@@ -78,10 +78,17 @@ impl Tool for HotelRetrieveBookingTool {
             .ok_or_else(|| TravelportError::InvalidArg("booking not found".into()))?;
 
         let mut supplier_status = None;
-        if let Some(reservation_id) = row.travelport_reservation_id.as_deref() {
-            match self.travelport.retrieve(reservation_id).await {
-                Ok(resp) => supplier_status = resp.status,
-                Err(e) => warn!("Travelport retrieve failed for {reservation_id}: {e}"),
+        if let Some(aggregator) = row.travelport_reservation_id.as_deref() {
+            match self.travelport.retrieve(aggregator).await {
+                Ok(resp) => {
+                    supplier_status = resp
+                        .reservation_response
+                        .and_then(|r| r.receipt.into_iter().next())
+                        .and_then(|r| r.confirmation)
+                        .and_then(|c| c.offer_status)
+                        .and_then(|s| s.status);
+                }
+                Err(e) => warn!("Travelport retrieve failed for {aggregator}: {e}"),
             }
         }
 
@@ -93,6 +100,7 @@ impl Tool for HotelRetrieveBookingTool {
         Ok(HotelRetrieveBookingOutput {
             booking_id: row.id,
             reservation_id: row.travelport_reservation_id,
+            supplier_locator: row.travelport_supplier_locator,
             hotel_name: row.hotel_name,
             check_in: row.check_in.to_string(),
             check_out: row.check_out.to_string(),

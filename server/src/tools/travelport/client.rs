@@ -78,7 +78,7 @@ struct TokenResponse {
 pub struct TravelportClient {
     base_url: String,
     token_url: String,
-    pcc: String,
+    access_group: String,
     client_id: String,
     client_secret: String,
     username: String,
@@ -91,7 +91,7 @@ impl std::fmt::Debug for TravelportClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TravelportClient")
             .field("base_url", &self.base_url)
-            .field("pcc", &self.pcc)
+            .field("access_group_len", &self.access_group.len())
             .field("client_id_len", &self.client_id.len())
             .field("username_len", &self.username.len())
             .finish()
@@ -104,7 +104,7 @@ pub struct TravelportClientCreds {
     pub username: String,
     pub password: String,
     pub env: TravelportEnv,
-    pub pcc: String,
+    pub access_group: String,
 }
 
 impl TravelportClient {
@@ -112,7 +112,7 @@ impl TravelportClient {
         Self {
             base_url: creds.env.base_url().to_string(),
             token_url: creds.env.token_url().to_string(),
-            pcc: creds.pcc,
+            access_group: creds.access_group,
             client_id: creds.client_id,
             client_secret: creds.client_secret,
             username: creds.username,
@@ -182,8 +182,10 @@ impl TravelportClient {
             .http
             .post(format!("{}{path}", self.base_url))
             .bearer_auth(token)
-            .header("XAUTH_TRAVELPORT_ACCESSGROUP", &self.pcc)
+            .header("XAUTH_TRAVELPORT_ACCESSGROUP", &self.access_group)
             .header("Accept", "application/json")
+            .header("Accept-Version", "11")
+            .header("Content-Version", "11")
             .json(body)
             .send()
             .await?;
@@ -202,8 +204,10 @@ impl TravelportClient {
             .http
             .get(format!("{}{path}", self.base_url))
             .bearer_auth(token)
-            .header("XAUTH_TRAVELPORT_ACCESSGROUP", &self.pcc)
+            .header("XAUTH_TRAVELPORT_ACCESSGROUP", &self.access_group)
             .header("Accept", "application/json")
+            .header("Accept-Version", "11")
+            .header("Content-Version", "11")
             .send()
             .await?;
         let status = resp.status();
@@ -215,19 +219,22 @@ impl TravelportClient {
         Ok(text)
     }
 
-    async fn delete(&self, path: &str) -> Result<String, TravelportError> {
+    async fn put_empty(&self, path: &str) -> Result<String, TravelportError> {
         let token = self.token().await?;
         let resp = self
             .http
-            .delete(format!("{}{path}", self.base_url))
+            .put(format!("{}{path}", self.base_url))
             .bearer_auth(token)
-            .header("XAUTH_TRAVELPORT_ACCESSGROUP", &self.pcc)
+            .header("XAUTH_TRAVELPORT_ACCESSGROUP", &self.access_group)
             .header("Accept", "application/json")
+            .header("Accept-Version", "11")
+            .header("Content-Version", "11")
+            .header("Content-Length", "0")
             .send()
             .await?;
         let status = resp.status();
         let text = resp.text().await?;
-        debug!("DELETE {path} -> {status}");
+        debug!("PUT {path} -> {status}");
         if !status.is_success() {
             return Err(make_api_error(status, text));
         }
@@ -237,70 +244,81 @@ impl TravelportClient {
 
 // ── Hotel endpoints ─────────────────────────────────────────────────────────
 //
-// Paths are derived from the public Travelport v11 docs ToC and named
-// `/11/hotel/...` to match the documented prefix. Exact URL segments must be
-// verified against developer-portal sample payloads when the first request
-// is made — if a path 404s, only the constants in this section need updating.
+// Paths verified against the public Hotel v11 API reference pages on
+// `support.travelport.com/webhelp/JSONAPIs/Hotelv11/`. All hotel endpoints
+// sit under `/11/hotel/`.
 
-const PATH_SEARCH_LOCATION: &str = "/11/hotel/search/location";
-const PATH_DETAILS_TEMPLATE: &str = "/11/hotel/properties/{property_id}";
-const PATH_AVAILABILITY: &str = "/11/hotel/offers/availability";
-const PATH_RESERVATIONS: &str = "/11/hotel/reservations";
-const PATH_RESERVATION_TEMPLATE: &str = "/11/hotel/reservations/{reservation_id}";
+const PATH_SEARCH_LOCATION: &str = "/11/hotel/search/properties/search";
+const PATH_DETAILS: &str = "/11/hotel/search/propertiesdetail";
+const PATH_AVAILABILITY: &str = "/11/hotel/availability/catalogofferingshospitality";
+const PATH_RESERVATIONS_BUILD: &str = "/11/hotel/book/reservations/build";
+const PATH_RESERVATION_TEMPLATE: &str = "/11/hotel/book/reservations/{locator}";
+const PATH_RESERVATION_CANCEL_TEMPLATE: &str =
+    "/11/hotel/book/reservations/{locator}/canceloffer";
 
 impl TravelportClient {
-    #[instrument(skip(self), fields(location = req.location_code, check_in = req.check_in, check_out = req.check_out))]
+    #[instrument(skip(self, req))]
     pub(super) async fn search_by_location(
         &self,
-        req: SearchByLocationReq<'_>,
+        req: SearchByLocationReq,
     ) -> Result<SearchResp, TravelportError> {
         let body = self.post(PATH_SEARCH_LOCATION, &req).await?;
         serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
     }
 
-    #[instrument(skip(self), fields(property_id))]
-    pub(super) async fn hotel_details(&self, property_id: &str) -> Result<DetailsResp, TravelportError> {
-        let path = PATH_DETAILS_TEMPLATE.replace("{property_id}", property_id);
+    #[instrument(skip(self), fields(chain_code, property_code))]
+    pub(super) async fn hotel_details(
+        &self,
+        chain_code: &str,
+        property_code: &str,
+    ) -> Result<DetailsResp, TravelportError> {
+        let path = format!(
+            "{PATH_DETAILS}?chainCode={chain_code}&propertyCode={property_code}"
+        );
         let body = self.get(&path).await?;
         serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
     }
 
-    #[instrument(skip(self), fields(property_id = req.property_id, check_in = req.check_in, check_out = req.check_out))]
+    #[instrument(skip(self, req))]
     pub(super) async fn availability(
         &self,
-        req: AvailabilityReq<'_>,
+        req: AvailabilityReq,
     ) -> Result<AvailabilityResp, TravelportError> {
         let body = self.post(PATH_AVAILABILITY, &req).await?;
         serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
     }
 
-    #[instrument(skip(self, req), fields(property_id = req.property_id, offer_id = req.offer_id))]
-    pub(super) async fn book(&self, req: BookReq<'_>) -> Result<BookResp, TravelportError> {
-        let body = self.post(PATH_RESERVATIONS, &req).await?;
+    #[instrument(skip(self, req))]
+    pub(super) async fn book(&self, req: BookReq) -> Result<ReservationResp, TravelportError> {
+        let body = self.post(PATH_RESERVATIONS_BUILD, &req).await?;
         serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
     }
 
-    #[instrument(skip(self), fields(reservation_id))]
+    #[instrument(skip(self), fields(aggregator_locator))]
     pub(super) async fn retrieve(
         &self,
-        reservation_id: &str,
+        aggregator_locator: &str,
     ) -> Result<ReservationResp, TravelportError> {
-        let path = PATH_RESERVATION_TEMPLATE.replace("{reservation_id}", reservation_id);
+        let path = PATH_RESERVATION_TEMPLATE.replace("{locator}", aggregator_locator);
         let body = self.get(&path).await?;
         serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
     }
 
-    #[instrument(skip(self), fields(reservation_id))]
-    pub(super) async fn cancel(&self, reservation_id: &str) -> Result<CancelResp, TravelportError> {
-        let path = PATH_RESERVATION_TEMPLATE.replace("{reservation_id}", reservation_id);
-        let body = self.delete(&path).await?;
+    /// Cancel — PUT, with the supplier locator as a query parameter.
+    #[instrument(skip(self), fields(aggregator_locator, supplier_locator))]
+    pub(super) async fn cancel(
+        &self,
+        aggregator_locator: &str,
+        supplier_locator: &str,
+    ) -> Result<ReservationResp, TravelportError> {
+        let path = format!(
+            "{}?supplierLocator={supplier_locator}",
+            PATH_RESERVATION_CANCEL_TEMPLATE.replace("{locator}", aggregator_locator)
+        );
+        let body = self.put_empty(&path).await?;
         if body.trim().is_empty() {
-            // Some Travelport endpoints respond 204; synthesize a minimal
-            // success payload so callers can treat the result uniformly.
-            return Ok(CancelResp {
-                status: Some("cancelled".into()),
-                refund_amount: None,
-                currency: None,
+            return Ok(ReservationResp {
+                reservation_response: None,
             });
         }
         serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))

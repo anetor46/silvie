@@ -4,12 +4,17 @@ single-use virtual card is issued, and Travelport books with the virtual card.
 On success the customer is charged; on failure the authorisation is released.
 
 Before calling this tool you MUST have:
-- `property_id`, `offer_id`, `rate_id` from the most recent `hotel_availability`
-  call (rates older than that may be stale).
-- `hotel_name`, `check_in`, `check_out`, `guests`, `guest_name`.
+- `property_id` (composite, from hotel_search), `offer_id` (CatalogOffering
+  Identifier from the most recent `hotel_availability`), and `rate_id`
+  (the `bookingCode` from the same availability response). Travelport's
+  cached offers expire ~30 minutes after the Availability call — if you've
+  waited longer, re-run availability before booking.
+- `hotel_name`, `check_in`, `check_out`, `guests`.
+- `guest_given_name` and `guest_surname` — Travelport requires the lead
+  guest's name split into two fields. Ask the user if you don't have both.
 - `total_price_minor_units` — the exact total returned by
-  `hotel_availability.total_minor_units`. Do NOT re-derive from per-night
-  numbers.
+  `hotel_availability.rates[].total_minor_units`. Do NOT re-derive from
+  per-night numbers.
 - `currency` — uppercase ISO 4217 (`USD`, `EUR`, `GBP`).
 
 Always state the price, hotel, dates, and refund policy to the user and obtain

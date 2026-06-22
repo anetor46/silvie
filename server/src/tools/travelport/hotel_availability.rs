@@ -6,9 +6,15 @@ use tracing::{info, instrument};
 
 use super::client::TravelportClient;
 use super::error::TravelportError;
-use super::models::{to_minor_units, AvailabilityReq, RateQuote};
+use super::models::{
+    split_property_id, to_minor_units, AvailGuestCount, AvailGuestCounts, AvailRoomStayCandidate,
+    AvailabilityReq, CatalogOfferingsQueryRequest, CatalogOfferingsRequestHospitality,
+    HotelSearchCriterion, PropertyKey, PropertyRequest, RateQuote, RoomStayCandidates, StayDates,
+};
 
 const DESCRIPTION: &str = include_str!("../../../prompts/travelport/hotel_availability.md");
+
+const AGGREGATOR_TVPT: &str = "TVPT";
 
 pub struct HotelAvailabilityTool {
     client: TravelportClient,
@@ -27,6 +33,8 @@ pub struct HotelAvailabilityArgs {
     pub check_out: String,
     pub adults: Option<u32>,
     pub rooms: Option<u32>,
+    /// ISO 4217. Default "USD". Travelport requires a `requestedCurrency`.
+    pub currency: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -50,11 +58,12 @@ impl Tool for HotelAvailabilityTool {
                 "type": "object",
                 "required": ["property_id", "check_in", "check_out"],
                 "properties": {
-                    "property_id": { "type": "string", "description": "Property ID from hotel_search." },
-                    "check_in":    { "type": "string", "description": "Check-in (YYYY-MM-DD)." },
-                    "check_out":   { "type": "string", "description": "Check-out (YYYY-MM-DD)." },
-                    "adults":      { "type": "integer", "minimum": 1, "description": "Adults per room. Default 1." },
-                    "rooms":       { "type": "integer", "minimum": 1, "description": "Rooms required. Default 1." }
+                    "property_id": { "type": "string", "description": "Composite property id from hotel_search (chainCode-propertyCode)." },
+                    "check_in":    { "type": "string", "description": "YYYY-MM-DD" },
+                    "check_out":   { "type": "string", "description": "YYYY-MM-DD" },
+                    "adults":      { "type": "integer", "minimum": 1 },
+                    "rooms":       { "type": "integer", "minimum": 1 },
+                    "currency":    { "type": "string", "description": "ISO 4217 (USD/EUR/GBP). Default USD." }
                 }
             }),
         }
@@ -67,32 +76,137 @@ impl Tool for HotelAvailabilityTool {
         NaiveDate::parse_from_str(&args.check_out, "%Y-%m-%d")
             .map_err(|e| TravelportError::InvalidArg(format!("check_out not a valid date: {e}")))?;
 
+        let (chain, code) = split_property_id(&args.property_id).ok_or_else(|| {
+            TravelportError::InvalidArg(format!(
+                "property_id '{}' is not in 'chainCode-propertyCode' form",
+                args.property_id
+            ))
+        })?;
+        let adults = args.adults.unwrap_or(1);
+        let rooms = args.rooms.unwrap_or(1);
+        let currency = args
+            .currency
+            .clone()
+            .unwrap_or_else(|| "USD".into())
+            .to_uppercase();
+
         let req = AvailabilityReq {
-            property_id: &args.property_id,
-            check_in: &args.check_in,
-            check_out: &args.check_out,
-            adults: args.adults.unwrap_or(1),
-            rooms: args.rooms.unwrap_or(1),
+            query: CatalogOfferingsQueryRequest {
+                catalog_offerings_request: vec![CatalogOfferingsRequestHospitality {
+                    type_: "CatalogOfferingsRequestHospitality",
+                    requested_currency: currency.clone(),
+                    stay_dates: StayDates {
+                        start: args.check_in.clone(),
+                        end: args.check_out.clone(),
+                    },
+                    hotel_search_criterion: HotelSearchCriterion {
+                        type_: "HotelSearchCriterion",
+                        number_of_rooms: rooms,
+                        aggregator_list: vec![AGGREGATOR_TVPT],
+                        property_request: vec![PropertyRequest {
+                            type_: "PropertyRequest",
+                            property_key: PropertyKey {
+                                chain_code: chain,
+                                property_code: code,
+                            },
+                        }],
+                        room_stay_candidates: RoomStayCandidates {
+                            room_stay_candidate: vec![AvailRoomStayCandidate {
+                                guest_counts: AvailGuestCounts {
+                                    guest_count: vec![AvailGuestCount {
+                                        count: adults.to_string(),
+                                    }],
+                                },
+                            }],
+                        },
+                    },
+                }],
+            },
         };
         let resp = self.client.availability(req).await?;
-        let rates: Vec<RateQuote> = resp
-            .rates
+
+        // Strict envelope parsing: if Travelport's shape diverges from what
+        // we expect, surface that as a concrete parse error rather than
+        // silently returning "no availability".
+        let catalog_offerings_response = resp.catalog_offerings_response.ok_or_else(|| {
+            TravelportError::Parse(
+                "availability response missing top-level CatalogOfferingsResponse".into(),
+            )
+        })?;
+        let catalog_offerings = catalog_offerings_response.catalog_offerings.ok_or_else(|| {
+            TravelportError::Parse(
+                "availability response missing CatalogOfferings inside CatalogOfferingsResponse"
+                    .into(),
+            )
+        })?;
+        let offerings = catalog_offerings.catalog_offering;
+
+        let rates = offerings
             .into_iter()
-            .filter_map(|r| {
-                let rate_id = r.rate_id?;
-                let currency = r.currency.unwrap_or_else(|| "USD".into()).to_uppercase();
-                let total = to_minor_units(r.total, &currency)?;
-                Some(RateQuote {
-                    offer_id: r.offer_id.unwrap_or_default(),
-                    rate_id,
-                    room_description: r.room_description,
-                    total_minor_units: total,
-                    currency: currency.clone(),
-                    refundable: r.refundable.unwrap_or(false),
-                    cancellation_policy: r.cancellation_policy.map(|p| p.into_domain(&currency)),
+            .enumerate()
+            .map(|(idx, o)| -> Result<RateQuote, TravelportError> {
+                let offer_id = o
+                    .identifier
+                    .and_then(|i| i.value)
+                    .ok_or_else(|| TravelportError::Parse(format!(
+                        "availability offering #{idx} missing Identifier.value (offer_id)"
+                    )))?;
+                let product = o.product.into_iter().next().ok_or_else(|| {
+                    TravelportError::Parse(format!(
+                        "availability offering #{idx} has no Product entries"
+                    ))
+                })?;
+                let booking_code = product.booking_code.ok_or_else(|| {
+                    TravelportError::Parse(format!(
+                        "availability offering #{idx} Product missing bookingCode (rate_id)"
+                    ))
+                })?;
+                let room_description = product.product_description.and_then(|t| t.value);
+
+                let (total_major, currency) = if let Some(price) = o.price.as_ref() {
+                    (
+                        price.total_price,
+                        price
+                            .currency_code
+                            .as_ref()
+                            .and_then(|c| c.value.clone())
+                            .ok_or_else(|| TravelportError::Parse(format!(
+                                "availability offering #{idx} Price missing CurrencyCode.value"
+                            )))?,
+                    )
+                } else if let Some(tp) = o.total_price.as_ref() {
+                    (
+                        tp.value,
+                        tp.code.clone().ok_or_else(|| TravelportError::Parse(format!(
+                            "availability offering #{idx} TotalPrice missing currency code"
+                        )))?,
+                    )
+                } else {
+                    return Err(TravelportError::Parse(format!(
+                        "availability offering #{idx} has neither Price nor TotalPrice"
+                    )));
+                };
+                let total_minor = to_minor_units(total_major).ok_or_else(|| {
+                    TravelportError::Parse(format!(
+                        "availability offering #{idx} total amount is missing or non-numeric"
+                    ))
+                })?;
+
+                Ok(RateQuote {
+                    offer_id,
+                    rate_id: booking_code,
+                    room_description,
+                    total_minor_units: total_minor,
+                    currency: currency.to_uppercase(),
+                    // Travelport v11 doesn't surface refundability on the
+                    // availability rate object in a stable way — leave it
+                    // false until the booking response confirms otherwise.
+                    refundable: false,
+                    cancellation_policy: None,
                 })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
+
         info!(count = rates.len(), "availability returned rates");
         Ok(HotelAvailabilityOutput {
             property_id: args.property_id,

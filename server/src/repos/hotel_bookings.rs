@@ -28,6 +28,7 @@ pub struct HotelBooking {
     pub user_id: Uuid,
     pub conversation_id: Option<Uuid>,
     pub travelport_reservation_id: Option<String>,
+    pub travelport_supplier_locator: Option<String>,
     pub travelport_property_id: String,
     pub travelport_offer_id: Option<String>,
     pub hotel_name: String,
@@ -133,14 +134,16 @@ pub async fn attach_payment_intent(pool: &DbPool, id: Uuid, intent_id: &str) -> 
 pub async fn mark_confirmed(
     pool: &DbPool,
     id: Uuid,
-    reservation_id: &str,
+    aggregator_locator: &str,
+    supplier_locator: Option<&str>,
     policy: Option<serde_json::Value>,
 ) -> Result<()> {
     let mut conn = pool.get().await.context("Failed to get DB connection")?;
     let n: usize = diesel::update(hotel_bookings::table.filter(hotel_bookings::id.eq(id)))
         .set((
             hotel_bookings::status.eq("confirmed"),
-            hotel_bookings::travelport_reservation_id.eq(reservation_id),
+            hotel_bookings::travelport_reservation_id.eq(aggregator_locator),
+            hotel_bookings::travelport_supplier_locator.eq(supplier_locator),
             hotel_bookings::cancellation_policy.eq(policy),
             hotel_bookings::confirmed_at.eq(diesel::dsl::now),
         ))
