@@ -372,10 +372,20 @@ pub(super) struct AvailGuestCount {
     pub count: String,
 }
 
+// Per the Hotel v11 docs the availability envelope is named
+// `CatalogOfferingsHospitalityResponse` (note the inner "Hospitality"),
+// the bookingCode lives at
+//   CatalogOffering.ProductOptions[].Product[].bookingCode,
+// the cached offer identifier is the `id` field directly on each
+// CatalogOffering, the total + currency are at
+//   CatalogOffering.Price.TotalPrice and CatalogOffering.Price.CurrencyCode.value,
+// and the cancellation policy is at
+//   CatalogOffering.TermsAndConditions.CancelPenalty.
+
 #[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 pub(super) struct AvailabilityResp {
-    #[serde(rename = "CatalogOfferingsResponse")]
+    #[serde(rename = "CatalogOfferingsHospitalityResponse")]
     pub catalog_offerings_response: Option<CatalogOfferingsResponse>,
 }
 
@@ -398,22 +408,30 @@ pub(super) struct CatalogOfferings {
 pub(super) struct CatalogOffering {
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default, rename = "Identifier")]
-    pub identifier: Option<Identifier>,
-    #[serde(default, rename = "Product")]
-    pub product: Vec<ProductHospitality>,
-    #[serde(default, rename = "TotalPrice")]
-    pub total_price: Option<MoneyValue>,
+    #[serde(default, rename = "ProductOptions")]
+    pub product_options: Vec<ProductOption>,
     #[serde(default, rename = "Price")]
     pub price: Option<PriceDetail>,
+    #[serde(default, rename = "TermsAndConditions")]
+    pub terms_and_conditions: Option<TermsAndConditions>,
 }
 
+/// Generic `Identifier { value, authority }` shape used by reservation
+/// responses. The booking/retrieve/cancel responses include this on each
+/// Offer alongside `id` — keep both available.
+#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub(super) struct Identifier {
     pub value: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub authority: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+pub(super) struct ProductOption {
+    #[serde(default, rename = "Product")]
+    pub product: Vec<ProductHospitality>,
 }
 
 #[allow(dead_code)]
@@ -425,10 +443,17 @@ pub(super) struct ProductHospitality {
     pub property_name: Option<String>,
     #[serde(default, rename = "PropertyKey")]
     pub property_key: Option<PropertyKey>,
-    #[serde(default, rename = "ProductDescription")]
-    pub product_description: Option<TextValue>,
+    #[serde(default, rename = "RoomType")]
+    pub room_type: Option<RoomType>,
     #[serde(default, rename = "guests")]
     pub guests: Option<u32>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+pub(super) struct RoomType {
+    #[serde(default, rename = "Description")]
+    pub description: Option<TextValue>,
 }
 
 #[allow(dead_code)]
@@ -442,6 +467,52 @@ pub(super) struct PriceDetail {
     pub base: Option<f64>,
     #[serde(default, rename = "TotalTaxes")]
     pub total_taxes: Option<f64>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+pub(super) struct TermsAndConditions {
+    #[serde(default, rename = "CancelPenalty")]
+    pub cancel_penalty: Option<CancelPenalty>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub(super) struct CancelPenalty {
+    /// "Yes" / "No" per the docs.
+    #[serde(default, rename = "Refundable")]
+    pub refundable: Option<String>,
+    #[serde(default, rename = "Deadline")]
+    pub deadline: Option<Deadline>,
+    #[serde(default, rename = "HotelPenalty")]
+    pub hotel_penalty: Option<HotelPenalty>,
+    #[serde(default, rename = "Description")]
+    pub description: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub(super) struct Deadline {
+    #[serde(default, rename = "SpecificDate")]
+    pub specific_date: Option<SpecificDate>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub(super) struct SpecificDate {
+    #[serde(default)]
+    pub start: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub(super) struct HotelPenalty {
+    #[serde(default, rename = "Percent")]
+    pub percent: Option<f64>,
+    #[serde(default, rename = "Amount")]
+    pub amount: Option<f64>,
+    #[serde(default, rename = "Nights")]
+    pub nights: Option<u32>,
 }
 
 // ── Book (reference-payload) ────────────────────────────────────────────────

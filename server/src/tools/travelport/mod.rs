@@ -8,6 +8,9 @@ mod hotel_retrieve;
 mod hotel_search;
 mod models;
 
+#[cfg(test)]
+mod tests;
+
 pub use client::{TravelportClient, TravelportClientCreds, TravelportEnv};
 pub use hotel_availability::HotelAvailabilityTool;
 pub use hotel_book::{HotelBookTool, HotelBookToolDeps};

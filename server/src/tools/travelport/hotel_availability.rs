@@ -7,9 +7,10 @@ use tracing::{info, instrument};
 use super::client::TravelportClient;
 use super::error::TravelportError;
 use super::models::{
-    split_property_id, to_minor_units, AvailGuestCount, AvailGuestCounts, AvailRoomStayCandidate,
-    AvailabilityReq, CatalogOfferingsQueryRequest, CatalogOfferingsRequestHospitality,
-    HotelSearchCriterion, PropertyKey, PropertyRequest, RateQuote, RoomStayCandidates, StayDates,
+    to_minor_units, AvailGuestCount, AvailGuestCounts, AvailRoomStayCandidate, AvailabilityReq,
+    CancellationPolicy, CancelPenalty, CatalogOfferingsQueryRequest,
+    CatalogOfferingsRequestHospitality, HotelSearchCriterion, PropertyKey, PropertyRequest,
+    RateQuote, RoomStayCandidates, StayDates,
 };
 
 const DESCRIPTION: &str = include_str!("../../../prompts/travelport/hotel_availability.md");
@@ -33,7 +34,6 @@ pub struct HotelAvailabilityArgs {
     pub check_out: String,
     pub adults: Option<u32>,
     pub rooms: Option<u32>,
-    /// ISO 4217. Default "USD". Travelport requires a `requestedCurrency`.
     pub currency: Option<String>,
 }
 
@@ -76,12 +76,14 @@ impl Tool for HotelAvailabilityTool {
         NaiveDate::parse_from_str(&args.check_out, "%Y-%m-%d")
             .map_err(|e| TravelportError::InvalidArg(format!("check_out not a valid date: {e}")))?;
 
-        let (chain, code) = split_property_id(&args.property_id).ok_or_else(|| {
-            TravelportError::InvalidArg(format!(
-                "property_id '{}' is not in 'chainCode-propertyCode' form",
-                args.property_id
-            ))
-        })?;
+        let (chain, code) = super::models::split_property_id(&args.property_id).ok_or_else(
+            || {
+                TravelportError::InvalidArg(format!(
+                    "property_id '{}' is not in 'chainCode-propertyCode' form",
+                    args.property_id
+                ))
+            },
+        )?;
         let adults = args.adults.unwrap_or(1);
         let rooms = args.rooms.unwrap_or(1);
         let currency = args
@@ -125,72 +127,82 @@ impl Tool for HotelAvailabilityTool {
         };
         let resp = self.client.availability(req).await?;
 
-        // Strict envelope parsing: if Travelport's shape diverges from what
-        // we expect, surface that as a concrete parse error rather than
-        // silently returning "no availability".
-        let catalog_offerings_response = resp.catalog_offerings_response.ok_or_else(|| {
-            TravelportError::Parse(
-                "availability response missing top-level CatalogOfferingsResponse".into(),
-            )
-        })?;
-        let catalog_offerings = catalog_offerings_response.catalog_offerings.ok_or_else(|| {
-            TravelportError::Parse(
-                "availability response missing CatalogOfferings inside CatalogOfferingsResponse"
-                    .into(),
-            )
-        })?;
-        let offerings = catalog_offerings.catalog_offering;
+        // Doc-verified path:
+        //   CatalogOfferingsHospitalityResponse.CatalogOfferings.CatalogOffering[]
+        let offerings = resp
+            .catalog_offerings_response
+            .and_then(|r| r.catalog_offerings)
+            .map(|c| c.catalog_offering)
+            .unwrap_or_default();
 
         let rates = offerings
             .into_iter()
             .enumerate()
             .map(|(idx, o)| -> Result<RateQuote, TravelportError> {
-                let offer_id = o
-                    .identifier
-                    .and_then(|i| i.value)
-                    .ok_or_else(|| TravelportError::Parse(format!(
-                        "availability offering #{idx} missing Identifier.value (offer_id)"
-                    )))?;
-                let product = o.product.into_iter().next().ok_or_else(|| {
+                // CatalogOffering.id is the cached offer identifier we
+                // pass back to the booking endpoint as
+                // CatalogOfferingIdentifier.value.
+                let offer_id = o.id.ok_or_else(|| {
                     TravelportError::Parse(format!(
-                        "availability offering #{idx} has no Product entries"
+                        "availability offering #{idx} missing CatalogOffering.id"
                     ))
                 })?;
+
+                // bookingCode lives at ProductOptions[].Product[].bookingCode
+                // — pick the first Product of the first ProductOption.
+                let product = o
+                    .product_options
+                    .into_iter()
+                    .next()
+                    .and_then(|po| po.product.into_iter().next())
+                    .ok_or_else(|| {
+                        TravelportError::Parse(format!(
+                            "availability offering #{idx} has no ProductOptions[].Product[]"
+                        ))
+                    })?;
                 let booking_code = product.booking_code.ok_or_else(|| {
                     TravelportError::Parse(format!(
                         "availability offering #{idx} Product missing bookingCode (rate_id)"
                     ))
                 })?;
-                let room_description = product.product_description.and_then(|t| t.value);
+                let room_description = product
+                    .room_type
+                    .and_then(|rt| rt.description)
+                    .and_then(|d| d.value);
 
-                let (total_major, currency) = if let Some(price) = o.price.as_ref() {
-                    (
-                        price.total_price,
-                        price
-                            .currency_code
-                            .as_ref()
-                            .and_then(|c| c.value.clone())
-                            .ok_or_else(|| TravelportError::Parse(format!(
-                                "availability offering #{idx} Price missing CurrencyCode.value"
-                            )))?,
-                    )
-                } else if let Some(tp) = o.total_price.as_ref() {
-                    (
-                        tp.value,
-                        tp.code.clone().ok_or_else(|| TravelportError::Parse(format!(
-                            "availability offering #{idx} TotalPrice missing currency code"
-                        )))?,
-                    )
-                } else {
-                    return Err(TravelportError::Parse(format!(
-                        "availability offering #{idx} has neither Price nor TotalPrice"
-                    )));
-                };
-                let total_minor = to_minor_units(total_major).ok_or_else(|| {
+                let price = o.price.ok_or_else(|| {
                     TravelportError::Parse(format!(
-                        "availability offering #{idx} total amount is missing or non-numeric"
+                        "availability offering #{idx} missing Price"
                     ))
                 })?;
+                let total_major = price.total_price.ok_or_else(|| {
+                    TravelportError::Parse(format!(
+                        "availability offering #{idx} missing Price.TotalPrice"
+                    ))
+                })?;
+                let currency = price
+                    .currency_code
+                    .as_ref()
+                    .and_then(|c| c.value.clone())
+                    .ok_or_else(|| {
+                        TravelportError::Parse(format!(
+                            "availability offering #{idx} missing Price.CurrencyCode.value"
+                        ))
+                    })?;
+                let total_minor = to_minor_units(Some(total_major)).ok_or_else(|| {
+                    TravelportError::Parse(format!(
+                        "availability offering #{idx} total amount is non-numeric"
+                    ))
+                })?;
+
+                let cancellation_policy = o
+                    .terms_and_conditions
+                    .and_then(|t| t.cancel_penalty)
+                    .map(|p| map_cancel_penalty(p, total_minor, &currency));
+                let refundable = cancellation_policy
+                    .as_ref()
+                    .map(|p| p.refundable)
+                    .unwrap_or(false);
 
                 Ok(RateQuote {
                     offer_id,
@@ -198,11 +210,8 @@ impl Tool for HotelAvailabilityTool {
                     room_description,
                     total_minor_units: total_minor,
                     currency: currency.to_uppercase(),
-                    // Travelport v11 doesn't surface refundability on the
-                    // availability rate object in a stable way — leave it
-                    // false until the booking response confirms otherwise.
-                    refundable: false,
-                    cancellation_policy: None,
+                    refundable,
+                    cancellation_policy,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -212,5 +221,37 @@ impl Tool for HotelAvailabilityTool {
             property_id: args.property_id,
             rates,
         })
+    }
+}
+
+/// Translate Travelport's `CancelPenalty` into our domain
+/// `CancellationPolicy`. Travelport encodes refundability as the strings
+/// "Yes" / "No" — both are accepted defensively (lowercase too) and
+/// anything else falls back to non-refundable.
+fn map_cancel_penalty(p: CancelPenalty, total_minor: i64, _currency: &str) -> CancellationPolicy {
+    let refundable = matches!(
+        p.refundable.as_deref().map(str::trim).unwrap_or(""),
+        "Yes" | "yes" | "YES" | "true"
+    );
+    let refund_deadline = p
+        .deadline
+        .and_then(|d| d.specific_date)
+        .and_then(|s| s.start);
+    // Penalty: prefer absolute amount → percent of total → nights
+    // unhandled. If only Percent is present we apply it to the total.
+    let penalty_minor_units = p.hotel_penalty.as_ref().and_then(|hp| {
+        if let Some(amt) = hp.amount {
+            to_minor_units(Some(amt))
+        } else if let Some(pct) = hp.percent {
+            Some(((total_minor as f64) * pct / 100.0).round() as i64)
+        } else {
+            None
+        }
+    });
+    CancellationPolicy {
+        refundable,
+        refund_deadline,
+        penalty_minor_units,
+        description: p.description,
     }
 }

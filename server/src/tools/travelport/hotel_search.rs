@@ -129,9 +129,11 @@ impl Tool for HotelSearchTool {
             },
         };
         let resp = self.client.search_by_location(req).await?;
-
-        // Strict envelope parsing — surface shape mismatches as concrete
-        // errors instead of producing an empty result.
+        // Strict envelope parsing — if Travelport's shape diverges,
+        // `UnexpectedResponse` is emitted by the client with the body
+        // already logged. The optional fields here only catch the case
+        // where the documented envelope is present but inner sections
+        // are missing.
         let properties_response = resp.properties_response.ok_or_else(|| {
             TravelportError::Parse(
                 "search response missing top-level PropertiesResponse".into(),
@@ -249,3 +251,4 @@ impl Tool for HotelSearchTool {
         })
     }
 }
+

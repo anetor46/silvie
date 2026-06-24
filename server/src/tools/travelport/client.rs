@@ -263,7 +263,7 @@ impl TravelportClient {
         req: SearchByLocationReq,
     ) -> Result<SearchResp, TravelportError> {
         let body = self.post(PATH_SEARCH_LOCATION, &req).await?;
-        serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
+        deserialize_or_log(&body, "search")
     }
 
     #[instrument(skip(self), fields(chain_code, property_code))]
@@ -272,11 +272,10 @@ impl TravelportClient {
         chain_code: &str,
         property_code: &str,
     ) -> Result<DetailsResp, TravelportError> {
-        let path = format!(
-            "{PATH_DETAILS}?chainCode={chain_code}&propertyCode={property_code}"
-        );
+        let path =
+            format!("{PATH_DETAILS}?chainCode={chain_code}&propertyCode={property_code}");
         let body = self.get(&path).await?;
-        serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
+        deserialize_or_log(&body, "details")
     }
 
     #[instrument(skip(self, req))]
@@ -285,13 +284,13 @@ impl TravelportClient {
         req: AvailabilityReq,
     ) -> Result<AvailabilityResp, TravelportError> {
         let body = self.post(PATH_AVAILABILITY, &req).await?;
-        serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
+        deserialize_or_log(&body, "availability")
     }
 
     #[instrument(skip(self, req))]
     pub(super) async fn book(&self, req: BookReq) -> Result<ReservationResp, TravelportError> {
         let body = self.post(PATH_RESERVATIONS_BUILD, &req).await?;
-        serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
+        deserialize_or_log(&body, "book")
     }
 
     #[instrument(skip(self), fields(aggregator_locator))]
@@ -301,7 +300,7 @@ impl TravelportClient {
     ) -> Result<ReservationResp, TravelportError> {
         let path = PATH_RESERVATION_TEMPLATE.replace("{locator}", aggregator_locator);
         let body = self.get(&path).await?;
-        serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
+        deserialize_or_log(&body, "retrieve")
     }
 
     /// Cancel — PUT, with the supplier locator as a query parameter.
@@ -321,6 +320,26 @@ impl TravelportClient {
                 reservation_response: None,
             });
         }
-        serde_json::from_str(&body).map_err(|e| TravelportError::Parse(format!("{e}: {body}")))
+        deserialize_or_log(&body, "cancel")
     }
+}
+
+/// Deserialize a Travelport response into the typed struct, or log the
+/// full body and return a user-friendly `UnexpectedResponse`. Used by every
+/// endpoint so the deserialize step has uniform diagnostic behaviour: if
+/// Travelport ever returns a shape that doesn't match our model, we
+/// capture the raw body in the logs once — no recompiling needed to see
+/// what came back.
+fn deserialize_or_log<T: serde::de::DeserializeOwned>(
+    body: &str,
+    context: &'static str,
+) -> Result<T, TravelportError> {
+    serde_json::from_str(body).map_err(|e| {
+        super::error::log_and_unexpected(
+            context,
+            "The hotel supplier returned a response we couldn't read.",
+            body,
+            &[("deserialize_error", &e.to_string())],
+        )
+    })
 }
